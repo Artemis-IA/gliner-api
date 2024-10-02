@@ -1,0 +1,5 @@
+uploads/
+dataset/
+models/
+__pycache__/
+*.pyc

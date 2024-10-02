@@ -1,0 +1,27 @@
+.
+├── datasets
+│   └── vivendi.pdf
+├── main.py
+├── models
+│   ├── __init__.py
+│   ├── ner_model.py
+├── routers
+│   ├── auth.py
+│   ├── dataset.py
+│   ├── __init__.py
+│   ├── ner.py
+│   └── train.py
+├── schemas
+│   ├── auth.py
+│   ├── __init__.py
+│   └── schemas.py
+├── services
+│   ├── dataset_creator.py
+│   ├── model_manager.py
+│   ├── ocr_service.py
+│   └── security.py
+├── tree.txt
+└── utils
+    ├── file_utils.py
+    ├── __init__.py
+    ├── metrics.py

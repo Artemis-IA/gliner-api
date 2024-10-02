@@ -1,0 +1,15 @@
+artifact_uri: file:///home/artemis/Documents/Projets/glinerapp/mlruns/0/d86f88232dad431a83d3695eaf8ac584/artifacts
+end_time: 1727879348481
+entry_point_name: ''
+experiment_id: '0'
+lifecycle_stage: active
+run_id: d86f88232dad431a83d3695eaf8ac584
+run_name: dapper-shoat-933
+run_uuid: d86f88232dad431a83d3695eaf8ac584
+source_name: ''
+source_type: 4
+source_version: ''
+start_time: 1727879344445
+status: 3
+tags: []
+user_id: artemis
