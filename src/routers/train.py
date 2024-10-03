@@ -1,11 +1,11 @@
 from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy.orm import Session
-from app.schemas.train import TrainRequest, TrainResponse
-from app.db.session import SessionLocal
-from app.db.models import Dataset, TrainingRun
-from app.utils.gliner_utils import train_gliner_model, create_gliner_dataset
-from app.core.prometheus_setup import REQUEST_COUNT, REQUEST_LATENCY
-from app.core.config import settings
+from schemas.train import TrainRequest, TrainResponse
+from db.session import SessionLocal
+from db.models import Dataset, TrainingRun
+from utils.gliner_utils import train_gliner_model, create_gliner_dataset
+from utils.metrics import REQUEST_COUNT, REQUEST_LATENCY
+from core.config import settings
 import time
 import mlflow
 

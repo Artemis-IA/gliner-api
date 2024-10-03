@@ -1,10 +1,10 @@
 from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy.orm import Session
-from app.schemas.dataset import DatasetCreate, DatasetResponse, DatasetUpdate
-from app.db.session import SessionLocal
-from app.db.models import Dataset
-from app.utils.gliner_utils import create_gliner_dataset
-from app.core.prometheus_setup import REQUEST_COUNT, REQUEST_LATENCY
+from schemas.dataset import DatasetCreate, DatasetResponse, DatasetUpdate
+from db.session import SessionLocal
+from db.models import Dataset
+from utils.gliner_utils import create_gliner_dataset
+from utils.metrics import REQUEST_COUNT, REQUEST_LATENCY
 import time
 
 router = APIRouter(

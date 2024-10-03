@@ -1,12 +1,13 @@
-import os
-from pydantic import BaseSettings
+# src/core/config.py
+from pydantic_settings import BaseSettings
+from pathlib import Path
 
 class Settings(BaseSettings):
-    database_url: str = os.getenv("DATABASE_URL", "postgresql://user:password@localhost:5432/gliner_db")
-    mlflow_tracking_uri: str = os.getenv("MLFLOW_TRACKING_URI", "http://mlflow:5000")
-    prometheus_port: int = int(os.getenv("PROMETHEUS_PORT", 8000))
+    database_url: str
+    mlflow_tracking_uri: str
+    prometheus_port: int = 8008
 
     class Config:
-        env_file = ".env"
+        env_file = Path(__file__).resolve().parent.parent.parent / ".env"  # Ajuster le chemin vers .env
 
 settings = Settings()
