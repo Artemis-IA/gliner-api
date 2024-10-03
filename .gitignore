@@ -4,3 +4,7 @@ models/
 __pycache__/
 *.pyc
 mlruns/
+
+.env
+venv
+env/

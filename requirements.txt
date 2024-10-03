@@ -1,7 +1,10 @@
 fastapi
 uvicorn
+alembic
 pydantic
+pydantic-settings
 python-multipart
+psycopg2-binary
 pillow
 GPUtil
 pdfminer.six
