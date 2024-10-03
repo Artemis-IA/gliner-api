@@ -1,75 +1,42 @@
-# routers/ner.py
+from fastapi import APIRouter, Depends, HTTPException, UploadFile, File
+from sqlalchemy.orm import Session
+from schemas.inference import InferenceRequest, InferenceResponse
+from db.session import SessionLocal
+from db.models import Inference
+from utils.gliner_utils import run_gliner_inference
+from utils.metrics import REQUEST_COUNT, REQUEST_LATENCY
+import time
 
-from fastapi import APIRouter, UploadFile, File, HTTPException
-from models.ner_model import NERModel
-from schemas.schemas import NERInferenceResponse, ModelListResponse, Entity
-from utils.file_utils import extract_text_from_pdf, extract_text_from_image
-from services.model_manager import ModelManager
-from pathlib import Path
-import shutil
-from typing import List
+router = APIRouter(
+    prefix="/inference",
+    tags=["Inference"]
+)
 
-router = APIRouter(prefix="/ner", tags=["NER"])
+def get_db():
+    db = SessionLocal()
+    try:
+        yield db
+    finally:
+        db.close()
 
-model_manager = ModelManager()
-available_models = model_manager.get_available_models()
-
-
-@router.get("/models", response_model=ModelListResponse)
-async def get_models():
-    """Récupère la liste des modèles GLiNER disponibles."""
-    return ModelListResponse(models=list(available_models.keys()))
-
-
-@router.post("/predict", response_model=NERInferenceResponse)
-async def perform_ner(
-    file: UploadFile = File(...),
-    model_name: str = "GLiNER-S",
-    labels: List[str] = None,
-    threshold: float = 0.5,
-):
-    if model_name not in available_models:
-        raise HTTPException(status_code=400, detail="Modèle non disponible.")
-
-    ner_model = NERModel(name=model_name)
-    ner_model.load()
-
-    UPLOAD_DIR = Path("uploads")
-    UPLOAD_DIR.mkdir(exist_ok=True)
-    file_location = UPLOAD_DIR / file.filename
-
-    with open(file_location, "wb+") as file_object:
-        shutil.copyfileobj(file.file, file_object)
-
-    if file.content_type == "application/pdf":
-        text = extract_text_from_pdf(file_location)
-    elif file.content_type in ["image/png", "image/jpeg"]:
-        text = extract_text_from_image(file_location)
-    else:
-        raise HTTPException(status_code=400, detail="Type de fichier non supporté")
-
-    texts = [text]
-
-    # Utiliser des labels par défaut si aucun n'est fourni
-    if labels is None:
-        labels = ["Person", "Organization", "Location", "Date", "Time", "Money", "Percent"]
-
-    # Effectuer la prédiction
-    predictions = ner_model.batch_predict(
-        targets=texts,
-        labels=labels,
-        threshold=threshold,
-    )
-
-    # Traiter les prédictions pour correspondre au schéma NERInferenceResponse
-    entities = []
-    for entity_list in predictions:
-        for entity in entity_list:
-            entities.append(Entity(
-                text=entity['text'],
-                label=entity['label'],
-                start_char=entity['start'],
-                end_char=entity['end']
-            ))
-
-    return NERInferenceResponse(filename=file.filename, entities=entities)
+@router.post("/", response_model=InferenceResponse)
+def create_inference(request: InferenceRequest, db: Session = Depends(get_db)):
+    start_time = time.time()
+    REQUEST_COUNT.labels(endpoint="inference_create").inc()
+    try:
+        entities = run_gliner_inference(request.file_path)
+        inference = Inference(file_path=request.file_path, entities=entities)
+        db.add(inference)
+        db.commit()
+        db.refresh(inference)
+        return InferenceResponse(
+            id=inference.id,
+            file_path=inference.file_path,
+            entities=inference.entities,
+            created_at=inference.created_at.isoformat()
+        )
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+    finally:
+        latency = time.time() - start_time
+        REQUEST_LATENCY.labels(endpoint="inference_create").observe(latency)

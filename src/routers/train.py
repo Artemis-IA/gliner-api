@@ -1,59 +1,80 @@
-# routers/train.py
+from fastapi import APIRouter, Depends, HTTPException
+from sqlalchemy.orm import Session
+from app.schemas.train import TrainRequest, TrainResponse
+from app.db.session import SessionLocal
+from app.db.models import Dataset, TrainingRun
+from app.utils.gliner_utils import train_gliner_model, create_gliner_dataset
+from app.core.prometheus_setup import REQUEST_COUNT, REQUEST_LATENCY
+from app.core.config import settings
+import time
+import mlflow
 
-from fastapi import APIRouter, HTTPException
-from models.ner_model import NERModel
-from schemas.schemas import TrainRequest, TrainResponse
-from services.model_manager import ModelManager
-from routers.dataset import datasets_storage
-from pathlib import Path
+router = APIRouter(
+    prefix="/train",
+    tags=["Train"]
+)
 
-router = APIRouter(prefix="/train", tags=["Train"])
-
-model_manager = ModelManager()
-available_models = model_manager.get_available_models()
-
+def get_db():
+    db = SessionLocal()
+    try:
+        yield db
+    finally:
+        db.close()
 
 @router.post("/", response_model=TrainResponse)
-async def train_model(train_request: TrainRequest):
-    model_name = train_request.model_name
-    labels = train_request.labels
-    dataset_id = train_request.dataset_id
-    epochs = train_request.epochs
-    batch_size = train_request.batch_size
-
-    if model_name not in available_models:
-        raise HTTPException(status_code=400, detail="Modèle non disponible.")
-
-    dataset = datasets_storage.get(dataset_id)
-    if not dataset:
-        raise HTTPException(status_code=404, detail="Dataset non trouvé.")
-
-    train_texts = [item['text'] for item in dataset]
-    train_annotations = [item['annotations'] for item in dataset]
-
-    # Préparer les données d'entraînement dans le format attendu par GLiNER
-    train_data = []
-    for text, annotations in zip(train_texts, train_annotations):
-        train_data.append({
-            'text': text,
-            'entities': annotations  # Doit être au format attendu par GLiNER
-        })
-
-    ner_model = NERModel(name=model_name)
-    ner_model.load()
-
-    # Ajuster la configuration d'entraînement
-    ner_model.train_config.num_steps = epochs * len(train_data) // batch_size
-    ner_model.train_config.train_batch_size = batch_size
-
-    # Entraîner le modèle
-    ner_model.train(
-        train_data=train_data,
-        eval_data=None,  # Ajouter des données d'évaluation si disponible
-    )
-
-    # Sauvegarder le modèle entraîné
-    model_output_dir = f"trained_models/{model_name.replace('/', '_')}_{dataset_id}"
-    ner_model.save(file_name=model_output_dir)
-
-    return TrainResponse(status="training_completed", model_path=model_output_dir)
+def train_model(request: TrainRequest, db: Session = Depends(get_db)):
+    start_time = time.time()
+    REQUEST_COUNT.labels(endpoint="train_create").inc()
+    try:
+        # Récupérer le dataset depuis la DB
+        dataset = db.query(Dataset).filter(Dataset.id == request.dataset_id).first()
+        if not dataset:
+            raise HTTPException(status_code=404, detail="Dataset not found")
+        
+        dataset_path = create_gliner_dataset(dataset.data, format="json-ner")
+        
+        # Démarrer un run MLflow
+        with mlflow.start_run() as run:
+            run_id = run.info.run_id
+            mlflow.log_param("dataset_id", request.dataset_id)
+            mlflow.log_param("epochs", request.epochs)
+            mlflow.log_param("batch_size", request.batch_size)
+            
+            # Entraîner le modèle
+            model_output = train_gliner_model(dataset_path, request.epochs, request.batch_size)
+            
+            # Log des résultats
+            mlflow.log_artifact(model_output, "model")
+        
+        # Enregistrer le run dans la DB
+        training_run = TrainingRun(
+            run_id=run_id,
+            dataset_id=request.dataset_id,
+            epochs=request.epochs,
+            batch_size=request.batch_size,
+            status="Completed"
+        )
+        db.add(training_run)
+        db.commit()
+        db.refresh(training_run)
+        
+        return TrainResponse(
+            run_id=training_run.run_id,
+            status=training_run.status,
+            created_at=training_run.created_at.isoformat()
+        )
+    except Exception as e:
+        # Enregistrer le run en échec
+        training_run = TrainingRun(
+            run_id="",
+            dataset_id=request.dataset_id,
+            epochs=request.epochs,
+            batch_size=request.batch_size,
+            status=f"Failed: {str(e)}"
+        )
+        db.add(training_run)
+        db.commit()
+        raise HTTPException(status_code=500, detail=str(e))
+    finally:
+        latency = time.time() - start_time
+        REQUEST_LATENCY.labels(endpoint="train_create").observe(latency)
