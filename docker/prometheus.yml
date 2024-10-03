@@ -5,3 +5,7 @@ scrape_configs:
   - job_name: 'fastapi'
     static_configs:
       - targets: ['host.docker.internal:8008']  # Remplacez par l'IP de votre hôte si nécessaire
+
+  - job_name: 'mlflow'
+    static_configs:
+      - targets: ['mlflow:5000']
