@@ -1,17 +1,21 @@
+# src/schemas/dataset.py
 from pydantic import BaseModel, Field
 from typing import List, Dict
 from datetime import datetime
 
 class DatasetCreate(BaseModel):
-    name: str = Field(..., examples="Sample Dataset")
-    data: List[Dict] = Field(..., examples=[{"text": "Example", "entities": ["Entity1", "Entity2"]}])
+    name: str = Field(..., example="Sample Dataset")
+    data: List[Dict] = Field(..., example=[{"text": "Example", "entities": ["Entity1", "Entity2"]}])
 
 class DatasetUpdate(BaseModel):
-    name: str = Field(..., examples="Updated Dataset")
-    data: List[Dict] = Field(..., examples=[{"text": "Updated Example", "entities": ["Entity3"]}])
+    name: str = Field(..., example="Updated Dataset")
+    data: List[Dict] = Field(..., example=[{"text": "Updated Example", "entities": ["Entity3"]}])
 
 class DatasetResponse(BaseModel):
     id: int
     name: str
     data: List[Dict]
     created_at: datetime
+
+    class Config:
+        from_attributes = True

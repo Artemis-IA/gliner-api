@@ -1,7 +1,7 @@
+# src/schemas/train.py
 from pydantic import BaseModel, Field
 from typing import Optional
 from datetime import datetime
-
 class TrainRequest(BaseModel):
     dataset_id: int = Field(..., example=1)
     epochs: int = Field(10, example=20)
@@ -15,6 +15,5 @@ class TrainResponse(BaseModel):
     batch_size: int
     status: str
     created_at: datetime
-
     class Config:
         from_attributes = True
