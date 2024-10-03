@@ -1,0 +1,33 @@
+services:
+  postgres:
+    image: postgres:latest
+    container_name: pgcrawl
+    environment:
+      POSTGRES_USER: user
+      POSTGRES_PASSWORD: password
+      POSTGRES_DB: database
+    volumes:
+      - pgcrawl_data:/var/lib/postgresql/data
+      - ./init.sql:/docker-entrypoint-initdb.d/init.sql
+      - ./entrypoint.sh:/docker-entrypoint-initdb.d/entrypoint.sh
+    ports:
+      - "5434:5432"
+    networks:
+      - pgcrawl-network
+
+  adminer:
+    image: adminer:latest
+    container_name: adminer
+    depends_on:
+      - postgres
+    ports:
+      - "8080:8080"
+    networks:
+      - pgcrawl-network
+
+volumes:
+  pgcrawl_data:
+
+networks:
+  pgcrawl-network:
+    driver: bridge
