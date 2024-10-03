@@ -1,26 +1,25 @@
--- Enable the pgvector extension
-CREATE EXTENSION IF NOT EXISTS vector;
+-- init.sql
 
--- Drop the documents table and any objects that depend on it
-DROP TABLE IF EXISTS documents CASCADE;
-
--- Create the documents table with vector support for embedding
-CREATE TABLE documents (
+CREATE TABLE IF NOT EXISTS datasets (
     id SERIAL PRIMARY KEY,
-    title TEXT NOT NULL,
-    company TEXT,
-    publication_date DATE,
-    pdf_link TEXT NOT NULL,
-    local_path TEXT,
-    vector VECTOR(768)
+    name VARCHAR(255) UNIQUE NOT NULL,
+    data JSON NOT NULL,
+    created_at TIMESTAMPTZ DEFAULT NOW()
 );
 
--- Table for storing search terms
-CREATE TABLE IF NOT EXISTS search_terms (
+CREATE TABLE IF NOT EXISTS inferences (
     id SERIAL PRIMARY KEY,
-    term TEXT NOT NULL
+    file_path VARCHAR(255) NOT NULL,
+    entities JSON NOT NULL,
+    created_at TIMESTAMPTZ DEFAULT NOW()
 );
 
--- Create indexes
-CREATE INDEX IF NOT EXISTS idx_pdf_link ON documents(pdf_link);
-CREATE INDEX IF NOT EXISTS idx_title ON documents USING GIN (to_tsvector('french', title));
+CREATE TABLE IF NOT EXISTS training_runs (
+    id SERIAL PRIMARY KEY,
+    run_id VARCHAR(255) UNIQUE NOT NULL,
+    dataset_id INTEGER NOT NULL REFERENCES datasets(id) ON DELETE CASCADE,
+    epochs INTEGER DEFAULT 10,
+    batch_size INTEGER DEFAULT 32,
+    status VARCHAR(50) DEFAULT 'Started',
+    created_at TIMESTAMPTZ DEFAULT NOW()
+);
