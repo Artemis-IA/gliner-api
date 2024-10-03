@@ -1,45 +1,102 @@
-# routers/dataset.py
+from fastapi import APIRouter, Depends, HTTPException
+from sqlalchemy.orm import Session
+from app.schemas.dataset import DatasetCreate, DatasetResponse, DatasetUpdate
+from app.db.session import SessionLocal
+from app.db.models import Dataset
+from app.utils.gliner_utils import create_gliner_dataset
+from app.core.prometheus_setup import REQUEST_COUNT, REQUEST_LATENCY
+import time
 
-from fastapi import APIRouter, UploadFile, File, HTTPException
-from schemas.schemas import NERDatasetResponse, NERDatasetSample
-from services.dataset_creator import create_ner_dataset
-from pathlib import Path
-import shutil
-import uuid
-from typing import List
+router = APIRouter(
+    prefix="/datasets",
+    tags=["Dataset Creator"]
+)
 
-router = APIRouter(prefix="/dataset", tags=["Dataset"])
+def get_db():
+    db = SessionLocal()
+    try:
+        yield db
+    finally:
+        db.close()
 
-DATASET_DIR = Path("datasets")
-DATASET_DIR.mkdir(exist_ok=True)
-datasets_storage = {}  # Dictionnaire pour stocker les datasets en mémoire
+@router.post("/", response_model=DatasetResponse)
+def create_dataset(request: DatasetCreate, db: Session = Depends(get_db)):
+    start_time = time.time()
+    REQUEST_COUNT.labels(endpoint="dataset_create").inc()
+    try:
+        dataset_path = create_gliner_dataset(request.data, format="json-ner")
+        dataset = Dataset(name=request.name, data=request.data)
+        db.add(dataset)
+        db.commit()
+        db.refresh(dataset)
+        return DatasetResponse(
+            id=dataset.id,
+            name=dataset.name,
+            data=dataset.data,
+            created_at=dataset.created_at.isoformat()
+        )
+    except Exception as e:
+        db.rollback()
+        raise HTTPException(status_code=500, detail=str(e))
+    finally:
+        latency = time.time() - start_time
+        REQUEST_LATENCY.labels(endpoint="dataset_create").observe(latency)
 
-
-@router.post("/", response_model=NERDatasetResponse)
-async def create_dataset(files: List[UploadFile] = File(...)):
-    file_paths = []
-    for file in files:
-        file_location = DATASET_DIR / file.filename
-        with open(file_location, "wb+") as file_object:
-            shutil.copyfileobj(file.file, file_object)
-        file_paths.append(file_location)
-
-    dataset = create_ner_dataset(file_paths)
-
-    dataset_id = str(uuid.uuid4())
-    datasets_storage[dataset_id] = dataset
-
-    samples = [NERDatasetSample(text=item['text'], annotations=item['annotations']) for item in dataset]
-
-    return NERDatasetResponse(dataset_id=dataset_id, samples=samples)
-
-
-@router.get("/{dataset_id}", response_model=NERDatasetResponse)
-async def get_dataset(dataset_id: str):
-    dataset = datasets_storage.get(dataset_id)
+@router.get("/{dataset_id}", response_model=DatasetResponse)
+def read_dataset(dataset_id: int, db: Session = Depends(get_db)):
+    start_time = time.time()
+    REQUEST_COUNT.labels(endpoint="dataset_read").inc()
+    dataset = db.query(Dataset).filter(Dataset.id == dataset_id).first()
     if not dataset:
-        raise HTTPException(status_code=404, detail="Dataset non trouvé.")
+        raise HTTPException(status_code=404, detail="Dataset not found")
+    latency = time.time() - start_time
+    REQUEST_LATENCY.labels(endpoint="dataset_read").observe(latency)
+    return DatasetResponse(
+        id=dataset.id,
+        name=dataset.name,
+        data=dataset.data,
+        created_at=dataset.created_at.isoformat()
+    )
 
-    samples = [NERDatasetSample(text=item['text'], annotations=item['annotations']) for item in dataset]
+@router.put("/{dataset_id}", response_model=DatasetResponse)
+def update_dataset(dataset_id: int, request: DatasetUpdate, db: Session = Depends(get_db)):
+    start_time = time.time()
+    REQUEST_COUNT.labels(endpoint="dataset_update").inc()
+    dataset = db.query(Dataset).filter(Dataset.id == dataset_id).first()
+    if not dataset:
+        raise HTTPException(status_code=404, detail="Dataset not found")
+    try:
+        dataset.name = request.name
+        dataset.data = request.data
+        db.commit()
+        db.refresh(dataset)
+        return DatasetResponse(
+            id=dataset.id,
+            name=dataset.name,
+            data=dataset.data,
+            created_at=dataset.created_at.isoformat()
+        )
+    except Exception as e:
+        db.rollback()
+        raise HTTPException(status_code=500, detail=str(e))
+    finally:
+        latency = time.time() - start_time
+        REQUEST_LATENCY.labels(endpoint="dataset_update").observe(latency)
 
-    return NERDatasetResponse(dataset_id=dataset_id, samples=samples)
+@router.delete("/{dataset_id}")
+def delete_dataset(dataset_id: int, db: Session = Depends(get_db)):
+    start_time = time.time()
+    REQUEST_COUNT.labels(endpoint="dataset_delete").inc()
+    dataset = db.query(Dataset).filter(Dataset.id == dataset_id).first()
+    if not dataset:
+        raise HTTPException(status_code=404, detail="Dataset not found")
+    try:
+        db.delete(dataset)
+        db.commit()
+        return {"detail": "Dataset deleted"}
+    except Exception as e:
+        db.rollback()
+        raise HTTPException(status_code=500, detail=str(e))
+    finally:
+        latency = time.time() - start_time
+        REQUEST_LATENCY.labels(endpoint="dataset_delete").observe(latency)
