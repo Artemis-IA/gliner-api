@@ -24,7 +24,7 @@ jobs:
         pip install -r requirements.txt
     - name: Run Tests
       run: |
-        pytest --cov=src tests/
+        PYTHONPATH=src pytest --cov=src tests/
     - name: Upload Coverage to Coveralls
       uses: coverallsapp/github-action@v2
       with:
