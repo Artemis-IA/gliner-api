@@ -1,17 +1,19 @@
 # utils/metrics.py
 
-from fastapi import FastAPI, Request, Response
-from prometheus_client import Counter, Histogram, generate_latest, CONTENT_TYPE_LATEST
+from prometheus_client import Counter, Histogram, CollectorRegistry, CONTENT_TYPE_LATEST, generate_latest
+
+# Utilisation d'un registre spécifique
+registry = CollectorRegistry()
 
 REQUEST_COUNT = Counter(
-    'request_count', 'Total number of requests', ['method', 'endpoint', 'http_status']
+    'request_count', 'Total number of requests', ['method', 'endpoint', 'http_status'], registry=registry
 )
-REQUEST_LATENCY = Histogram('request_latency_seconds', 'Latency of HTTP requests')
+REQUEST_LATENCY = Histogram('request_latency_seconds', 'Latency of HTTP requests', registry=registry)
 
-def setup_metrics(app: FastAPI):
+def setup_metrics(app):
 
     @app.middleware("http")
-    async def metrics_middleware(request: Request, call_next):
+    async def metrics_middleware(request, call_next):
         import time
         start_time = time.time()
         response = await call_next(request)
@@ -28,4 +30,4 @@ def setup_metrics(app: FastAPI):
 
     @app.get("/metrics")
     async def metrics():
-        return Response(generate_latest(), media_type=CONTENT_TYPE_LATEST)
+        return Response(generate_latest(registry=registry), media_type=CONTENT_TYPE_LATEST)
