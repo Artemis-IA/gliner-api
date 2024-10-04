@@ -22,3 +22,11 @@ python-jose[cryptography]
 passlib[bcrypt]
 flupy
 gliner
+
+pytest
+pytest-asyncio
+pytest-cov
+httpx
+sqlalchemy
+alembic
+mock

@@ -3,7 +3,7 @@
 from typing import List, Dict
 from pathlib import Path
 from utils.file_utils import extract_text_from_pdf, extract_text_from_image
-from schemas.schemas import Entity
+from src.schemas.dataset import Entity 
 import spacy
 import random
 import json
