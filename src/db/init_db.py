@@ -1,11 +1,14 @@
 # src/db/init_db.py
-from db.base import Base
+from alembic import command
+from alembic.config import Config
+from sqlalchemy.orm import sessionmaker
 from db.session import engine
-from db.models import Dataset, Inference, TrainingRun
+from db.models import Base
 
 def init_db():
+    # Create tables if they don't exist (for legacy usage)
     Base.metadata.create_all(bind=engine)
 
-if __name__ == "__main__":
-    init_db()
-    print("Base de données initialisée.")
+    # Run migrations using Alembic
+    alembic_cfg = Config("alembic.ini") 
+    command.upgrade(alembic_cfg, "head")  # Run all migrations

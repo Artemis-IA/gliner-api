@@ -1,11 +1,13 @@
+# src/routers/inference.py
 from fastapi import APIRouter, Depends, HTTPException, UploadFile, File, Form
 from sqlalchemy.orm import Session
 from pathlib import Path
 from schemas.inference import InferenceResponse
+from schemas.models_dict import ModelName 
 from db.session import SessionLocal
 from db.models import Inference
 from utils.file_utils import FileProcessor
-from models.ner_model import NERModel
+from models.ner_model import NERModel, MODELS
 from loguru import logger
 import time
 from typing import List
@@ -26,7 +28,7 @@ def get_db():
     finally:
         db.close()
 
-def process_file_and_inference(file_content: bytes, file_name: str, labels: str, db: Session, predictions: List):
+def process_file_and_inference(file_content: bytes, file_name: str, labels: str, threshold: float, db: Session, predictions: List):
     file_path = Path(f"/tmp/{file_name}")
     logger.info(f"Processing file: {file_name}")
 
@@ -73,19 +75,29 @@ def process_file_and_inference(file_content: bytes, file_name: str, labels: str,
 
 @router.post("/", response_model=List[InferenceResponse])
 async def create_inference(
-    files: List[UploadFile] = File(...),
-    labels: str = Form(...),
+    selected_model: ModelName = Form(..., description="Sélectionnez le modèle NER"),
+    files: List[UploadFile] = File(..., description="Fichiers à traiter"),
+    labels: str = Form(..., description="Liste des entités pour l'inférence"),
+    threshold: float = Form(0.3, description="Seuil de confiance pour l'inférence"),
     db: Session = Depends(get_db)
 ):
     start_time = time.time()
     predictions = []
 
+    if selected_model not in MODELS:
+        raise HTTPException(status_code=400, detail=f"Modèle {selected_model} non valide. Choisissez parmi: {', '.join(MODELS.keys())}")
+
     try:
+        # Charger le modèle sélectionné
+        logger.info(f"Chargement du modèle {selected_model}")
+        ner_model_instance = NERModel(name=selected_model)
+        ner_model_instance.load()  # Charger le modèle sélectionné
+
         # Process each file sequentially and synchronously
         for file in files:
             logger.info(f"Received file: {file.filename}")
             file_content = await file.read()  # Read file content
-            process_file_and_inference(file_content, file.filename, labels, db, predictions)
+            process_file_and_inference(file_content, file.filename, labels, threshold , db, predictions)
 
     except Exception as e:
         logger.error(f"Error during inference: {e}")

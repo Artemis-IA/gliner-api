@@ -1,8 +1,9 @@
 # src/routers/dataset.py
-from fastapi import APIRouter, Depends, HTTPException, UploadFile, File
+from fastapi import APIRouter, Depends, HTTPException, UploadFile, File, Form
+from schemas.dataset import DatasetUpdate
 from typing import List
 from services.dataset_creator import create_ner_dataset
-from schemas.dataset import DatasetCreate, DatasetResponse, DatasetUpdate
+from schemas.dataset import DatasetResponse
 from db.session import SessionLocal
 from db.models import Dataset
 from sqlalchemy.orm import Session
@@ -14,6 +15,7 @@ router = APIRouter(
     tags=["Dataset Creator"]
 )
 
+# Dependency to get DB session
 def get_db():
     db = SessionLocal()
     try:
@@ -23,33 +25,62 @@ def get_db():
 
 @router.post("/", response_model=DatasetResponse)
 async def create_dataset(
-    name: str,
-    format: str = "json-ner",
-    files: List[UploadFile] = File(...)
-, db: Session = Depends(get_db)):
-    """Endpoint pour créer un dataset à partir de fichiers uploadés."""
+    files: List[UploadFile] = File(...),
+    labels: str = Form(...),
+    output_format: str = Form("json"),
+    name: str = Form(None),
+    db: Session = Depends(get_db)
+):
+    """
+    Endpoint to create an NER dataset from uploaded files, with optional name and format.
+    If no name is provided, the name will default to the first PDF's filename + dataset ID.
+    """
     start_time = time.time()
-    REQUEST_COUNT.labels(endpoint="dataset_create").inc()
+
     try:
-        # Créer le dataset
-        dataset_data = await create_ner_dataset(files, format=format)
-        # Enregistrer dans la base de données
+        # Convert labels string to list
+        labels_list = [label.strip() for label in labels.split(',')] if labels else None
+
+        # Create the dataset
+        dataset_data = await create_ner_dataset(files, output_format=output_format, labels=labels_list)
+
+        # Determine default name if not provided
+        if not name:
+            pdf_files = [file for file in files if file.filename.endswith('.pdf')]
+            if pdf_files:
+                default_name = pdf_files[0].filename.rsplit('.', 1)[0]  # Filename without extension
+            else:
+                default_name = "dataset"
+
+            # Get next auto-increment ID from the database for naming
+            next_id = db.execute("SELECT nextval('datasets_id_seq')").scalar()
+            name = f"{default_name}_{next_id}"
+
+        # Save dataset to the database
         dataset = Dataset(name=name, data=dataset_data)
         db.add(dataset)
         db.commit()
         db.refresh(dataset)
+
+        # Increment request count with the correct labels
+        REQUEST_COUNT.labels(method="POST", endpoint="/datasets/", http_status="200").inc()
+
         return DatasetResponse(
             id=dataset.id,
             name=dataset.name,
             data=dataset.data,
             created_at=dataset.created_at.isoformat()
         )
+
     except Exception as e:
         db.rollback()
+        REQUEST_COUNT.labels(method="POST", endpoint="/datasets/", http_status="500").inc()
         raise HTTPException(status_code=500, detail=str(e))
+
     finally:
         latency = time.time() - start_time
-        REQUEST_LATENCY.labels(endpoint="dataset_create").observe(latency)
+        REQUEST_LATENCY.labels(method="POST", endpoint="/datasets/", http_status="200").observe(latency)
+        print(f"Dataset creation completed in {latency:.2f} seconds")
 
 @router.get("/{dataset_id}", response_model=DatasetResponse)
 def read_dataset(dataset_id: int, db: Session = Depends(get_db)):
