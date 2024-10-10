@@ -8,7 +8,9 @@ class Settings(BaseSettings):
     mlflow_tracking_uri: str
     mlflow_backend_store_uri: str
     mlflow_artifact_root: str
+    mlflow_db: str
     mlflow_port: int
+
     postgres_user: str
     postgres_password: str
     postgres_db: str

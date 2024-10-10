@@ -2,12 +2,13 @@
 
 from fastapi import FastAPI
 from routers import auth, dataset, inference, train
-from utils.mlflow_setup import setup_mlflow
+from utils.mlflow_manager import MLflowManager
 from utils.metrics import REQUEST_COUNT, REQUEST_LATENCY
 from prometheus_client import make_asgi_app
 from fastapi.middleware.cors import CORSMiddleware
 from db.init_db import init_db
 import uvicorn
+import logging
 
 app = FastAPI(
     title="GLiNER CRUD API",
@@ -15,11 +16,34 @@ app = FastAPI(
     version="1.0.0"
 )
 
+mlflow_manager = MLflowManager()
+
 @app.on_event("startup")
 def on_startup():
-    init_db() 
-    
-setup_mlflow()
+    logging.info("Démarrage de l'application...")
+    # init_db()
+    # mlflow_manager.setup_mlflow()
+
+@app.middleware("http")
+async def metrics_middleware(request, call_next):
+    import time
+    start_time = time.time()
+    response = await call_next(request)
+    process_time = time.time() - start_time
+
+    REQUEST_LATENCY.labels(
+        method=request.method,
+        endpoint=request.url.path,
+        http_status=response.status_code
+    ).observe(process_time)
+
+    REQUEST_COUNT.labels(
+        method=request.method,
+        endpoint=request.url.path,
+        http_status=response.status_code
+    ).inc()
+
+    return response
 
 app.include_router(auth.router, prefix="/auth")
 app.include_router(dataset.router, prefix="/dataset")

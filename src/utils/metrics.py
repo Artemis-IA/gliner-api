@@ -1,4 +1,4 @@
-# utils/metrics.py
+# src/utils/metrics.py
 
 from prometheus_client import Counter, Histogram, CollectorRegistry, CONTENT_TYPE_LATEST, generate_latest
 from fastapi import Response
