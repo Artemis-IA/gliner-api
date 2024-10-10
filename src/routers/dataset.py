@@ -1,9 +1,11 @@
-from fastapi import APIRouter, Depends, HTTPException
-from sqlalchemy.orm import Session
+# src/routers/dataset.py
+from fastapi import APIRouter, Depends, HTTPException, UploadFile, File
+from typing import List
+from services.dataset_creator import create_ner_dataset
 from schemas.dataset import DatasetCreate, DatasetResponse, DatasetUpdate
 from db.session import SessionLocal
 from db.models import Dataset
-from utils.gliner_utils import create_gliner_dataset
+from sqlalchemy.orm import Session
 from utils.metrics import REQUEST_COUNT, REQUEST_LATENCY
 import time
 
@@ -20,12 +22,19 @@ def get_db():
         db.close()
 
 @router.post("/", response_model=DatasetResponse)
-def create_dataset(request: DatasetCreate, db: Session = Depends(get_db)):
+async def create_dataset(
+    name: str,
+    format: str = "json-ner",
+    files: List[UploadFile] = File(...)
+, db: Session = Depends(get_db)):
+    """Endpoint pour créer un dataset à partir de fichiers uploadés."""
     start_time = time.time()
     REQUEST_COUNT.labels(endpoint="dataset_create").inc()
     try:
-        dataset_path = create_gliner_dataset(request.data, format="json-ner")
-        dataset = Dataset(name=request.name, data=request.data)
+        # Créer le dataset
+        dataset_data = await create_ner_dataset(files, format=format)
+        # Enregistrer dans la base de données
+        dataset = Dataset(name=name, data=dataset_data)
         db.add(dataset)
         db.commit()
         db.refresh(dataset)

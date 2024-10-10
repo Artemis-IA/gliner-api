@@ -2,9 +2,10 @@
 from pydantic import BaseModel, Field
 from typing import List, Dict
 from datetime import datetime
-
+from fastapi import UploadFile
 class InferenceRequest(BaseModel):
-    file_path: str = Field(..., example="path/to/file.pdf")
+    files: List[UploadFile] = Field(..., description="Fichiers PDF à traiter")
+    labels: List[str] = Field(..., description="Liste des labels pour l'inférence")
 
 class InferenceResponse(BaseModel):
     id: int

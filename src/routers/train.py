@@ -1,11 +1,14 @@
+# src/routers/train.py
 from fastapi import APIRouter, Depends, HTTPException
-from sqlalchemy.orm import Session
+from typing import List
 from schemas.train import TrainRequest, TrainResponse
+from services.model_manager import ModelManager
 from db.session import SessionLocal
-from db.models import Dataset, TrainingRun
-from utils.gliner_utils import train_gliner_model, create_gliner_dataset
+from db.models import TrainingRun
 from utils.metrics import REQUEST_COUNT, REQUEST_LATENCY
-from core.config import settings
+from sqlalchemy.orm import Session
+from db.models import Dataset, TrainingRun
+from db.session import SessionLocal
 import time
 import mlflow
 
@@ -22,33 +25,25 @@ def get_db():
         db.close()
 
 @router.post("/", response_model=TrainResponse)
-def train_model(request: TrainRequest, db: Session = Depends(get_db)):
+def train_endpoint(request: TrainRequest, db: Session = Depends(get_db)):
+    """Endpoint pour entraîner le modèle NER."""
     start_time = time.time()
     REQUEST_COUNT.labels(endpoint="train_create").inc()
     try:
+        # Charger le modèle
+        load_model()
+
         # Récupérer le dataset depuis la DB
         dataset = db.query(Dataset).filter(Dataset.id == request.dataset_id).first()
         if not dataset:
             raise HTTPException(status_code=404, detail="Dataset not found")
         
-        dataset_path = create_gliner_dataset(dataset.data, format="json-ner")
-        
-        # Démarrer un run MLflow
-        with mlflow.start_run() as run:
-            run_id = run.info.run_id
-            mlflow.log_param("dataset_id", request.dataset_id)
-            mlflow.log_param("epochs", request.epochs)
-            mlflow.log_param("batch_size", request.batch_size)
-            
-            # Entraîner le modèle
-            model_output = train_gliner_model(dataset_path, request.epochs, request.batch_size)
-            
-            # Log des résultats
-            mlflow.log_artifact(model_output, "model")
-        
+        # Entraîner le modèle
+        train_model(train_data=dataset.data)
+
         # Enregistrer le run dans la DB
         training_run = TrainingRun(
-            run_id=run_id,
+            run_id="mlflow_run_id_placeholder",  # Remplacer par le vrai run_id après intégration MLflow
             dataset_id=request.dataset_id,
             epochs=request.epochs,
             batch_size=request.batch_size,
@@ -59,7 +54,11 @@ def train_model(request: TrainRequest, db: Session = Depends(get_db)):
         db.refresh(training_run)
         
         return TrainResponse(
+            id=training_run.id,
             run_id=training_run.run_id,
+            dataset_id=training_run.dataset_id,
+            epochs=training_run.epochs,
+            batch_size=training_run.batch_size,
             status=training_run.status,
             created_at=training_run.created_at.isoformat()
         )

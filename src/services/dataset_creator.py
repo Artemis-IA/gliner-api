@@ -1,48 +1,32 @@
 # services/dataset_creator.py
-
 from typing import List, Dict
 from pathlib import Path
-from utils.file_utils import extract_text_from_pdf, extract_text_from_image
-from src.schemas.dataset import Entity 
+from utils.file_utils import FileProcessor
 import spacy
-import random
 import json
 import os
 
-# Charger le modèle de langue pour l'annotation automatique
-nlp = spacy.load('fr_core_news_sm')  # Assurez-vous d'installer le modèle spaCy pour le français
+nlp = spacy.load('fr_core_news_sm')  # Ensure spaCy is installed with 'fr_core_news_sm' model
 
 def create_ner_dataset(files: List[Path], output_format: str = 'json') -> List[Dict]:
-    """
-    Crée un dataset NER à partir des fichiers fournis.
-
-    Args:
-        files (List[Path]): Liste des chemins des fichiers.
-        output_format (str): Format de sortie ('json', 'nner', 'conllu').
-
-    Returns:
-        List[Dict]: Liste des exemples avec texte et annotations.
-    """
+    """Create an NER dataset from the provided files."""
     dataset = []
     for file_path in files:
         if file_path.suffix == '.pdf':
-            text = extract_text_from_pdf(file_path)
+            text = FileProcessor.extract_text_from_pdf(file_path)
         elif file_path.suffix in ['.png', '.jpg', '.jpeg']:
-            text = extract_text_from_image(file_path)
+            text = FileProcessor.extract_text_from_image(file_path)
         else:
-            continue  # Ignorer les types de fichiers non supportés
+            continue  # Ignore unsupported files
 
-        # Annoter le texte en utilisant spaCy pour obtenir des annotations automatiques
+        # Annotate the text using spaCy to extract entities
         annotations = annotate_text(text)
-
-        example = {
+        dataset.append({
             'text': text,
             'annotations': annotations
-        }
+        })
 
-        dataset.append(example)
-
-    # Sauvegarder le dataset dans le format souhaité
+    # Save the dataset in the desired format
     if output_format == 'json':
         save_as_json(dataset)
     elif output_format == 'nner':
@@ -50,20 +34,12 @@ def create_ner_dataset(files: List[Path], output_format: str = 'json') -> List[D
     elif output_format == 'conllu':
         save_as_conllu(dataset)
     else:
-        raise ValueError("Format de sortie non supporté. Choisissez parmi 'json', 'nner', 'conllu'.")
+        raise ValueError("Unsupported output format. Choose 'json', 'nner', or 'conllu'.")
 
     return dataset
 
 def annotate_text(text: str) -> List[Dict]:
-    """
-    Annoter le texte en utilisant spaCy pour obtenir des entités nommées.
-
-    Args:
-        text (str): Texte à annoter.
-
-    Returns:
-        List[Dict]: Liste des annotations avec 'start', 'end', et 'label'.
-    """
+    """Annotate text using spaCy NER to get named entities."""
     doc = nlp(text)
     annotations = []
     for ent in doc.ents:
@@ -75,18 +51,13 @@ def annotate_text(text: str) -> List[Dict]:
     return annotations
 
 def save_as_json(dataset: List[Dict], output_dir: str = 'datasets') -> None:
-    """
-    Sauvegarder le dataset au format JSON.
-
-    Args:
-        dataset (List[Dict]): Dataset à sauvegarder.
-        output_dir (str): Répertoire de sortie.
-    """
+    """Save the dataset as JSON."""
     os.makedirs(output_dir, exist_ok=True)
     output_path = Path(output_dir) / 'dataset.json'
     with open(output_path, 'w', encoding='utf-8') as f:
         json.dump(dataset, f, ensure_ascii=False, indent=4)
-    print(f"Dataset sauvegardé au format JSON dans {output_path}")
+    print(f"Dataset saved as JSON at {output_path}")
+
 
 def save_as_nner(dataset: List[Dict], output_dir: str = 'datasets') -> None:
     """
