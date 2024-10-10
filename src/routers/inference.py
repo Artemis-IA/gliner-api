@@ -1,17 +1,24 @@
-from fastapi import APIRouter, Depends, HTTPException, UploadFile, File
+from fastapi import APIRouter, Depends, HTTPException, UploadFile, File, Form
 from sqlalchemy.orm import Session
-from schemas.inference import InferenceRequest, InferenceResponse
+from pathlib import Path
+from schemas.inference import InferenceResponse
 from db.session import SessionLocal
 from db.models import Inference
-from utils.gliner_utils import run_gliner_inference
-from utils.metrics import REQUEST_COUNT, REQUEST_LATENCY
+from utils.file_utils import FileProcessor
+from models.ner_model import NERModel
+from loguru import logger
 import time
+from typing import List
+
+# Create an instance of the NERModel
+ner_model_instance = NERModel(name="GLiNER-S")
 
 router = APIRouter(
-    prefix="/inference",
+    prefix="/predict",
     tags=["Inference"]
 )
 
+# Dependency to get DB session
 def get_db():
     db = SessionLocal()
     try:
@@ -19,24 +26,73 @@ def get_db():
     finally:
         db.close()
 
-@router.post("/", response_model=InferenceResponse)
-def create_inference(request: InferenceRequest, db: Session = Depends(get_db)):
+def process_file_and_inference(file_content: bytes, file_name: str, labels: str, db: Session, predictions: List):
+    file_path = Path(f"/tmp/{file_name}")
+    logger.info(f"Processing file: {file_name}")
+
+    # Save file temporarily
+    with open(file_path, "wb") as buffer:
+        buffer.write(file_content)
+
+    # Extract text from the file
+    text = FileProcessor.process_file(file_path)
+    if text is None:
+        logger.error(f"Failed to extract text from {file_name}")
+        raise HTTPException(status_code=400, detail="Failed to extract text from file")
+
+    # Predict entities
+    raw_entities = ner_model_instance.batch_predict([text], labels.split(","))
+    logger.info(f"Predicted entities: {raw_entities}")
+
+    # Flatten entities and format them properly
+    entities = []
+    for entity_group in raw_entities:
+        for entity in entity_group:
+            entities.append({
+                "start": entity["start"],
+                "end": entity["end"],
+                "text": entity["text"],
+                "label": entity["label"],
+                "score": entity["score"]
+            })
+
+    # Save inference in the database
+    inference = Inference(file_path=file_name, entities=entities)
+    db.add(inference)
+    db.commit()
+    db.refresh(inference)
+    logger.info(f"Inference saved to DB with ID: {inference.id}")
+
+    # Add to predictions list
+    predictions.append(InferenceResponse(
+        id=inference.id,
+        file_path=inference.file_path,
+        entities=inference.entities,
+        created_at=inference.created_at.isoformat()
+    ))
+
+@router.post("/", response_model=List[InferenceResponse])
+async def create_inference(
+    files: List[UploadFile] = File(...),
+    labels: str = Form(...),
+    db: Session = Depends(get_db)
+):
     start_time = time.time()
-    REQUEST_COUNT.labels(endpoint="inference_create").inc()
+    predictions = []
+
     try:
-        entities = run_gliner_inference(request.file_path)
-        inference = Inference(file_path=request.file_path, entities=entities)
-        db.add(inference)
-        db.commit()
-        db.refresh(inference)
-        return InferenceResponse(
-            id=inference.id,
-            file_path=inference.file_path,
-            entities=inference.entities,
-            created_at=inference.created_at.isoformat()
-        )
+        # Process each file sequentially and synchronously
+        for file in files:
+            logger.info(f"Received file: {file.filename}")
+            file_content = await file.read()  # Read file content
+            process_file_and_inference(file_content, file.filename, labels, db, predictions)
+
     except Exception as e:
+        logger.error(f"Error during inference: {e}")
         raise HTTPException(status_code=500, detail=str(e))
     finally:
         latency = time.time() - start_time
-        REQUEST_LATENCY.labels(endpoint="inference_create").observe(latency)
+        logger.info(f"Inference completed in {latency:.2f} seconds")
+
+    logger.info(f"Returning predictions: {predictions}")
+    return predictions

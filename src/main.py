@@ -1,11 +1,12 @@
 # src/main.py
 
 from fastapi import FastAPI
-from routers import inference, dataset, train
+from routers import auth, dataset, inference, train
 from utils.mlflow_setup import setup_mlflow
 from utils.metrics import REQUEST_COUNT, REQUEST_LATENCY
 from prometheus_client import make_asgi_app
 from fastapi.middleware.cors import CORSMiddleware
+from db.init_db import init_db
 import uvicorn
 
 app = FastAPI(
@@ -14,18 +15,20 @@ app = FastAPI(
     version="1.0.0"
 )
 
-# Configurer MLflow
+@app.on_event("startup")
+def on_startup():
+    init_db() 
+    
 setup_mlflow()
 
-# Inclure les routers
-app.include_router(inference.router)
-app.include_router(dataset.router)
-app.include_router(train.router)
+app.include_router(auth.router, prefix="/auth")
+app.include_router(dataset.router, prefix="/dataset")
+app.include_router(inference.router, prefix="/inference")
+app.include_router(train.router, prefix="/train")
 
-# Ajouter middleware CORS si nécessaire
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],  # Modifier selon les besoins
+    allow_origins=["*"],
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],

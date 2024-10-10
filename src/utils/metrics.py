@@ -1,14 +1,19 @@
 # utils/metrics.py
 
 from prometheus_client import Counter, Histogram, CollectorRegistry, CONTENT_TYPE_LATEST, generate_latest
-
+from fastapi import Response
 # Utilisation d'un registre spécifique
 registry = CollectorRegistry()
 
 REQUEST_COUNT = Counter(
     'request_count', 'Total number of requests', ['method', 'endpoint', 'http_status'], registry=registry
 )
-REQUEST_LATENCY = Histogram('request_latency_seconds', 'Latency of HTTP requests', registry=registry)
+REQUEST_LATENCY = Histogram(
+    'request_latency_seconds', 
+    'Latency of HTTP requests', 
+    ['method', 'endpoint', 'http_status'],
+    registry=registry
+)
 
 def setup_metrics(app):
 

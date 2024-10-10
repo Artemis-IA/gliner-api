@@ -1,15 +1,18 @@
+# src/utils/gliner_utils.py
 import subprocess
 import os
 import json
+from models.ner_model import NERModel
 
-def run_gliner_inference(file_path: str) -> list:
-    # Exemple de commande pour exécuter GLiNER
-    command = ["python", "gliner.py", "--infer", file_path]
-    result = subprocess.run(command, capture_output=True, text=True)
-    if result.returncode != 0:
-        raise Exception(f"GLiNER inference failed: {result.stderr}")
-    # Supposons que le résultat est au format JSON
-    return json.loads(result.stdout)
+# Initialize model
+ner_model = NERModel()
+
+async def run_gliner_inference(text: str, labels: str):
+    """
+    Run inference on the provided text and labels using the NER model.
+    """
+    entities = ner_model.batch_predict([text], labels.split(","))
+    return entities[0]  # Assuming a single result for now
 
 def create_gliner_dataset(data: list, format: str = "json-ner") -> str:
     dataset_path = f"datasets/dataset.{format}"
