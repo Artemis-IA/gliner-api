@@ -1,5 +1,5 @@
 # src/db/models
-from sqlalchemy import Column, Integer, String, Text, JSON, DateTime
+from sqlalchemy import Column, Integer, String, Text, JSON, DateTime, event
 from sqlalchemy.sql import func
 from .base import Base
 
@@ -9,7 +9,16 @@ class Dataset(Base):
     name = Column(String, unique=True, index=True, nullable=False)
     data = Column(JSON, nullable=False)  # Stockage des données NER en JSON
     created_at = Column(DateTime(timezone=True), server_default=func.now())
+# Function to generate the name after the dataset is inserted
 
+@event.listens_for(Dataset, 'after_insert')
+def generate_dataset_name(mapper, connection, target):
+    if target.name == "":  # or handle None if necessary
+        connection.execute(
+            Dataset.__table__.update().
+            where(Dataset.id == target.id).
+            values(name=f"dataset_{target.id}")
+        )
 class Inference(Base):
     __tablename__ = "inferences"
     id = Column(Integer, primary_key=True, index=True)

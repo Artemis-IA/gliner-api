@@ -1,9 +1,9 @@
 # src/routers/inference.py
-from fastapi import APIRouter, Depends, HTTPException, UploadFile, File, Form
+from fastapi import APIRouter, Depends, HTTPException, UploadFile, File, Request, Form
 from sqlalchemy.orm import Session
 from pathlib import Path
-from schemas.inference import InferenceResponse
-from schemas.models_dict import ModelName 
+from schemas.inference import InferenceRequest, InferenceResponse
+from schemas.models_dict import ModelName
 from db.session import SessionLocal
 from db.models import Inference
 from utils.file_utils import FileProcessor
@@ -11,6 +11,7 @@ from models.ner_model import NERModel, MODELS
 from loguru import logger
 import time
 from typing import List
+
 
 # Create an instance of the NERModel
 ner_model_instance = NERModel(name="GLiNER-S")
@@ -73,12 +74,11 @@ def process_file_and_inference(file_content: bytes, file_name: str, labels: str,
         created_at=inference.created_at.isoformat()
     ))
 
-@router.post("/", response_model=List[InferenceResponse])
-async def create_inference(
+@router.post("/", response_model=List[InferenceResponse], status_code=202)
+async def predict_endpoint(
+    inference_request: InferenceRequest = Depends(InferenceRequest.as_form),
     selected_model: ModelName = Form(..., description="Sélectionnez le modèle NER"),
     files: List[UploadFile] = File(..., description="Fichiers à traiter"),
-    labels: str = Form(..., description="Liste des entités pour l'inférence"),
-    threshold: float = Form(0.3, description="Seuil de confiance pour l'inférence"),
     db: Session = Depends(get_db)
 ):
     start_time = time.time()
@@ -97,7 +97,14 @@ async def create_inference(
         for file in files:
             logger.info(f"Received file: {file.filename}")
             file_content = await file.read()  # Read file content
-            process_file_and_inference(file_content, file.filename, labels, threshold , db, predictions)
+            process_file_and_inference(
+                file_content, 
+                file.filename, 
+                ",".join(inference_request.labels), 
+                inference_request.threshold, 
+                db, 
+                predictions
+            )
 
     except Exception as e:
         logger.error(f"Error during inference: {e}")
