@@ -1,6 +1,7 @@
 # src/core/config.py
 from pydantic_settings import BaseSettings
 from pathlib import Path
+import torch
 
 class Settings(BaseSettings):
     # Variables d'environnement
@@ -27,7 +28,8 @@ class Settings(BaseSettings):
     
     prometheus_port: int = 8008
     
-    default_model: str = "urchade/gliner_smallv2.1"
+    default_models: str = "urchade/gliner_smallv2.1"
+
     train_config: dict = {
         "num_steps": 10_000,  # N training iteration
         "train_batch_size": 2,  # batch size for training
@@ -51,3 +53,28 @@ class Settings(BaseSettings):
 
 # Instanciation de la configuration
 settings = Settings()
+
+MODELS = {
+    "GLiNER-S": "urchade/gliner_smallv2.1",
+    "GLiNER-M": "urchade/gliner_mediumv2.1",
+    "GLiNER-L": "urchade/gliner_largev2.1",
+}
+
+DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+
+TRAIN_CONFIG = {
+    "num_steps": 10_000,
+    "train_batch_size": 2,
+    "eval_every": 1_000,
+    "save_directory": "checkpoints",
+    "warmup_ratio": 0.1,
+    "device": DEVICE,
+    "lr_encoder": 1e-5,
+    "lr_others": 5e-5,
+    "freeze_token_rep": False,
+    "max_types": 25,
+    "shuffle_types": True,
+    "random_drop": True,
+    "max_neg_type_ratio": 1,
+    "max_len": 384,
+}

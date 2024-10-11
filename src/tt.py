@@ -1,12 +1,6 @@
 from gliner import GLiNER
+import json
 
-# Charger le modèle GLiNER
 model = GLiNER.from_pretrained("knowledgator/gliner-multitask-large-v0.5")
-
-# Extraire la configuration du modèle
-entity_types = list(model.config.id2label.values())
-
-# Afficher les types d'entités pris en charge
-print("Liste des entités prises en charge par GLiNER :")
-for entity in entity_types:
-    print(entity)
+config = model.config.to_dict()
+print(json.dumps(config, indent=4))

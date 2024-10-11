@@ -1,7 +1,7 @@
 # src/main.py
 
 from fastapi import FastAPI
-from routers import auth, dataset, inference, train
+from routers import auth, dataset, inference, train, ml_backend
 from utils.mlflow_manager import MLflowManager
 from utils.metrics import REQUEST_COUNT, REQUEST_LATENCY
 from prometheus_client import make_asgi_app
@@ -23,6 +23,9 @@ def on_startup():
     logging.info("Démarrage de l'application...")
     # init_db()
     # mlflow_manager.setup_mlflow()
+    # mlflow_manager.run_migrations()
+    # ml_backend.start()
+
 
 @app.middleware("http")
 async def metrics_middleware(request, call_next):
@@ -49,6 +52,8 @@ app.include_router(auth.router, prefix="/auth")
 app.include_router(dataset.router, prefix="/dataset")
 app.include_router(inference.router, prefix="/inference")
 app.include_router(train.router, prefix="/train")
+app.include_router(ml_backend.router, prefix="/ml")
+
 
 app.add_middleware(
     CORSMiddleware,
