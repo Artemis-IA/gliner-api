@@ -2,6 +2,7 @@
 from fastapi import APIRouter, Depends, HTTPException, UploadFile, File, Form
 from schemas.dataset import DatasetUpdate
 from typing import List
+from fastapi.responses import JSONResponse
 from services.dataset_creator import create_ner_dataset
 from schemas.dataset import DatasetResponse
 from db.session import SessionLocal
@@ -26,9 +27,9 @@ def get_db():
 @router.post("/", response_model=DatasetResponse)
 async def create_dataset(
     files: List[UploadFile] = File(...),
-    labels: str = Form(...),
-    output_format: str = Form("json"),
     name: str = Form(None),
+    labels: str = Form("PERSON,ORG,GPE,DATE"),
+    output_format: str = Form("json"),
     db: Session = Depends(get_db)
 ):
     """
@@ -42,7 +43,7 @@ async def create_dataset(
         labels_list = [label.strip() for label in labels.split(',')] if labels else None
 
         # Create the dataset
-        dataset_data = await create_ner_dataset(files, output_format=output_format, labels=labels_list)
+        dataset_data = await create_ner_dataset(files, output_format=output_format, labels=labels_list, name=name, db=db)
 
         # Determine default name if not provided
         if not name:

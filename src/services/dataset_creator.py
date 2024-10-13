@@ -3,115 +3,115 @@ from typing import List, Dict, Optional
 from fastapi import UploadFile
 from pathlib import Path
 from utils.file_utils import FileProcessor
-import spacy
-import json
+from minio import Minio
+from sqlalchemy.orm import Session
+from db.models import Dataset
+from core.config import settings
 import os
 
-# Load the spaCy NER model (French in this case)
-nlp = spacy.load('fr_core_news_sm')
+# Setup MinIO client
+minio_client = Minio(
+    "localhost:9000",  # settings.minio_api_url,
+    access_key=settings.minio_root_user,
+    secret_key=settings.minio_root_password,
+    secure=False  # Set to True if using HTTPS
+)
+
+bucket_name = "datasets"
+if not minio_client.bucket_exists(bucket_name):
+    minio_client.make_bucket(bucket_name)
+
+async def upload_to_minio(file_path: Path, name: str, file_type: str) -> str:
+    """Upload a file to MinIO and return its URL."""
+    object_name = f"{name}/{file_type}/{file_path.name}"
+    minio_client.fput_object(bucket_name, object_name, str(file_path))
+    file_url = f"http://{settings.minio_api_url}/{bucket_name}/{object_name}"
+    return file_url
 
 async def create_ner_dataset(
     files: List[UploadFile],
-    output_format: str = 'json',
-    labels: Optional[List[str]] = None
+    output_format: str,
+    labels: Optional[List[str]],
+    name: str,
+    db: Session
 ) -> List[Dict]:
-    """Create an NER dataset from the provided files."""
+    """Create a dataset for NER tasks from the provided PDF files and store in MinIO."""
     dataset = []
-    
+    output_dir = Path(f"/tmp/extracted_data/{name}")
+    output_dir.mkdir(parents=True, exist_ok=True)
+
     for file in files:
-        file_path = Path(f"/tmp/{file.filename}")
+        file_path = output_dir / file.filename
         with open(file_path, "wb") as buffer:
             buffer.write(await file.read())
-        
-        # Extract text from the file
-        text = FileProcessor.process_file(file_path)
-        
-        # Annotate text using spaCy NER
-        annotations = annotate_text(text, labels)
-        
+
+        # Process the file: extract text and bounding boxes, convert PDF to images
+        file_data = FileProcessor.process_file(file_path, output_dir)
+
+        # Upload images to MinIO and get their URLs
+        image_urls = []
+        for image_path in file_data["images"]:
+            image_url = await upload_to_minio(image_path, name, "images")
+            image_urls.append(image_url)
+
+        # Upload text file to MinIO (optional, if you want the text separately)
+        text_file_path = output_dir / f"{file.filename}.txt"
+        with open(text_file_path, "w", encoding="utf-8") as text_file:
+            text_file.write(file_data["text"])
+        text_url = await upload_to_minio(text_file_path, name, "text")
+
+        # Prepare the dataset entry for Label Studio
         dataset.append({
-            'text': text,
-            'annotations': annotations
+            'task_id': len(dataset) + 1,  # Unique task ID
+            'image_urls': image_urls,
+            'text_url': text_url,
+            'boxes': file_data["boxes"],  # Bounding boxes of text
+            'file_name': file.filename,
+            'annotations': []  # No annotations initially
         })
-    
-    # Return the dataset in the desired format
-    if output_format == 'json':
-        return dataset  # Return as JSON structured data
-    elif output_format == 'nner':
-        return save_as_nner(dataset)
-    elif output_format == 'conllu':
-        return save_as_conllu(dataset)
-    else:
-        raise ValueError("Unsupported format. Choose 'json', 'nner', or 'conllu'.")
 
+    # Save the dataset metadata in PostgreSQL
+    dataset_entry = Dataset(name=name, data=dataset)
+    db.add(dataset_entry)
+    db.commit()
+    db.refresh(dataset_entry)
 
-def annotate_text(text: str, labels: Optional[List[str]] = None) -> List[Dict]:
-    """Annotate text using spaCy's NER model to get named entities."""
-    doc = nlp(text)
-    annotations = []
-    for ent in doc.ents:
-        if labels is None or ent.label_ in labels:
-            annotations.append({
-                'start': ent.start_char,
-                'end': ent.end_char,
-                'label': ent.label_
-            })
-    return annotations
+    # Generate tasks in Label Studio format
+    label_studio_tasks = format_for_label_studio(dataset)
+    return label_studio_tasks
 
-
-
-def save_as_json(dataset: List[Dict], output_dir: str = 'datasets') -> None:
-    """Save the dataset as JSON."""
-    os.makedirs(output_dir, exist_ok=True)
-    output_path = Path(output_dir) / 'dataset.json'
-    with open(output_path, 'w', encoding='utf-8') as f:
-        json.dump(dataset, f, ensure_ascii=False, indent=4)
-    print(f"Dataset saved as JSON at {output_path}")
-
-
-def save_as_nner(dataset: List[Dict], output_dir: str = 'datasets') -> None:
-    """
-    Sauvegarder le dataset au format nNER.
-
-    Args:
-        dataset (List[Dict]): Dataset à sauvegarder.
-        output_dir (str): Répertoire de sortie.
-    """
-    os.makedirs(output_dir, exist_ok=True)
-    output_path = Path(output_dir) / 'dataset.nner'
-    with open(output_path, 'w', encoding='utf-8') as f:
-        for example in dataset:
-            text = example['text']
-            annotations = example['annotations']
-            entities = []
-            for ann in annotations:
-                entities.append(f"{ann['start']} {ann['end']} {ann['label']}")
-            entities_str = '\n'.join(entities)
-            f.write(f"{text}\n{entities_str}\n\n")
-    print(f"Dataset sauvegardé au format nNER dans {output_path}")
-
-def save_as_conllu(dataset: List[Dict], output_dir: str = 'datasets') -> None:
-    """
-    Sauvegarder le dataset au format CoNLL-U.
-
-    Args:
-        dataset (List[Dict]): Dataset à sauvegarder.
-        output_dir (str): Répertoire de sortie.
-    """
-    os.makedirs(output_dir, exist_ok=True)
-    output_path = Path(output_dir) / 'dataset.conllu'
-    with open(output_path, 'w', encoding='utf-8') as f:
-        for example in dataset:
-            text = example['text']
-            annotations = example['annotations']
-            tokens = nlp(text)
-            for token in tokens:
-                # Trouver l'étiquette correspondante
-                label = 'O'
-                for ann in annotations:
-                    if token.idx >= ann['start'] and token.idx + len(token) <= ann['end']:
-                        label = f"B-{ann['label']}"
-                        break
-                f.write(f"{token.text}\t{label}\n")
-            f.write('\n')
-    print(f"Dataset sauvegardé au format CoNLL-U dans {output_path}")
+def format_for_label_studio(dataset: List[Dict]) -> List[Dict]:
+    """Convert the dataset into a format compatible with Label Studio."""
+    label_studio_dataset = []
+    for data in dataset:
+        # Create a task for each image in the PDF
+        for image_url, box in zip(data["image_urls"], data["boxes"]):
+            task = {
+                "data": {
+                    "image": image_url,  # Image URL for Label Studio to display
+                    "text": data["text_url"]  # Text associated with the image (in MinIO)
+                },
+                "meta": {
+                    "source": data["file_name"],
+                    "task_id": data["task_id"]
+                },
+                "annotations": [
+                    {
+                        "result": [
+                            {
+                                "from_name": "bbox",
+                                "to_name": "image",
+                                "type": "rectanglelabels",
+                                "value": {
+                                    "x": box['bbox'][0],
+                                    "y": box['bbox'][1],
+                                    "width": box['bbox'][2] - box['bbox'][0],
+                                    "height": box['bbox'][3] - box['bbox'][1]
+                                }
+                            }
+                        ]
+                    }
+                ]
+            }
+            label_studio_dataset.append(task)
+    return label_studio_dataset
