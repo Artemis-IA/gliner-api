@@ -21,7 +21,28 @@ split_documents = text_splitter.split_documents(documents)
 
 # Step 2: Initialize the GLiNER NER extractor for entity linking
 gliner_extractor = GLiNERLinkExtractor(
-    labels=["Person", "Organization", "Product"],  # Example of entity types
+    labels = [
+    "Board of Directors", 
+    "Audit Committee", 
+    "Chief Financial Officer (CFO)", 
+    "Chief Sustainability Officer", 
+    "Governance and Compliance Committee", 
+    "ESG Funds", 
+    "Risk Manager", 
+    "Institutional Investors", 
+    "Audit Firms", 
+    "Financial Regulatory Authorities", 
+    "Sustainability Committee", 
+    "Accounting Standards Organizations", 
+    "Impact Investment Funds", 
+    "Activist Shareholders", 
+    "Corporate Governance Consultants", 
+    "ESG Certification Bodies", 
+    "Investor Relations Managers", 
+    "Consumer Advocacy Groups", 
+    "ESG Data Providers", 
+    "Financial Analysts"
+    ],
     model="urchade/gliner_mediumv2.1"
 )
 
