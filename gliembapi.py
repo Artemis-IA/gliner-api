@@ -1,13 +1,15 @@
-from fastapi import FastAPI, UploadFile, File, Form
-from typing import List, Optional
-from langchain_community.document_loaders import PyPDFDirectoryLoader, PyPDFLoader
+from fastapi import FastAPI, Form
+from typing import Optional
+from langchain_community.document_loaders import PyPDFDirectoryLoader
 from langchain_text_splitters import CharacterTextSplitter
+from langchain_experimental.graph_transformers.gliner import GlinerGraphTransformer
 from langchain_community.graph_vectorstores.extractors import GLiNERLinkExtractor
 from neo4j import GraphDatabase
-from transformers import pipeline, AutoTokenizer, AutoModelForCausalLM
+from transformers import pipeline, AutoTokenizer, AutoModelForCausalLM, AutoConfig
 from langchain_huggingface import HuggingFacePipeline
-import os
 from loguru import logger
+import os
+import torch
 
 app = FastAPI()
 
@@ -17,7 +19,7 @@ USER = "neo4j"
 PASSWORD = "your_password"
 driver = GraphDatabase.driver(URI, auth=(USER, PASSWORD))
 
-# Initialize GLiNER for entity extraction
+# Initialize GLiNER for entity extraction (for the chat route)
 gliner_extractor = GLiNERLinkExtractor(
     labels=[
         "Board of Directors", 
@@ -44,27 +46,111 @@ gliner_extractor = GLiNERLinkExtractor(
     model="urchade/gliner_mediumv2.1"
 )
 
-# Function to add entities and relationships to Neo4j
-def add_to_neo4j(doc_id, entities, relationships):
-    with driver.session() as session:
-        # Create entities (nodes)
-        for entity in entities:
-            logger.info(f"Adding entity to Neo4j: {entity}")
-            session.run(
-                "MERGE (e:Entity {name: $name, type: $type})",
-                {"name": entity.tag if hasattr(entity, 'tag') else getattr(entity, 'label', 'unknown'), "type": getattr(entity, 'kind', 'unknown')}
-            )
-        # Create relationships (edges)
-        for rel in relationships:
-            logger.info(f"Adding relationship to Neo4j: {rel}")
-            session.run(
-                """
-                MATCH (source:Entity {name: $source}), (target:Entity {name: $target})
-                MERGE (source)-[:RELATED_TO {type: $type}]->(target)
-                """,
-                {"source": rel["source"], "target": rel["target"], "type": rel["type"]}
-            )
+# GlinerGraphTransformer setup
+graph_transformer = GlinerGraphTransformer(
+    allowed_nodes=[
+        "Board of Directors", "Audit Committee", "Chief Financial Officer (CFO)",
+        "Chief Sustainability Officer", "Governance and Compliance Committee",
+        "ESG Funds", "Risk Manager", "Institutional Investors",
+        "Audit Firms", "Financial Regulatory Authorities",
+        "Sustainability Committee", "Accounting Standards Organizations",
+        "Impact Investment Funds", "Activist Shareholders",
+        "Corporate Governance Consultants", "ESG Certification Bodies",
+        "Investor Relations Managers", "Consumer Advocacy Groups",
+        "ESG Data Providers", "Financial Analysts"
+    ],
+    allowed_relationships=["collaborates_with", "reports_to", "influences"],
+    gliner_model="urchade/gliner_mediumv2.1",
+    glirel_model="jackboyla/glirel_beta",
+    entity_confidence_threshold=0.1,
+    relationship_confidence_threshold=0.1,
+    device="cuda" if torch.cuda.is_available() else "cpu"
+)
 
+# Function to add graph nodes and edges to Neo4j
+def add_graph_to_neo4j(graph_docs):
+    with driver.session() as session:
+        for graph_doc in graph_docs:
+            # Add nodes to Neo4j
+            for node in graph_doc.nodes:
+                logger.info(f"Adding node to Neo4j: {node}")
+                session.run(
+                    "MERGE (e:Entity {name: $name, type: $type})",
+                    {"name": node.id, "type": node.type}
+                )
+            # Add edges to Neo4j if they exist
+            if hasattr(graph_doc, 'relationships') and graph_doc.relationships:
+                for edge in graph_doc.relationships:
+                    logger.info(f"Adding edge to Neo4j: {edge}")
+                    session.run(
+                        """
+                        MATCH (source:Entity {name: $source}), (target:Entity {name: $target})
+                        MERGE (source)-[:RELATED_TO {type: $type}]->(target)
+                        """,
+                        {"source": edge.source.id, "target": edge.target.id, "type": edge.type}
+                    )
+
+@app.post("/index/")
+async def index_pdfs(
+    folder_path: Optional[str] = Form(None)
+):
+    documents = []
+
+    # Handle folder path for directory input
+    if folder_path:
+        if os.path.isdir(folder_path):
+            logger.info(f"Loading documents from folder: {folder_path}")
+            loader = PyPDFDirectoryLoader(folder_path)
+            documents = loader.load()
+        else:
+            logger.error("Invalid folder path provided.")
+            return {"error": "Invalid folder path"}
+    else:
+        logger.error("No folder path provided for indexing.")
+        return {"error": "You must provide a folder path."}
+    
+    # Proceed with document processing
+    logger.info("Splitting documents into smaller chunks.")
+    text_splitter = CharacterTextSplitter(chunk_size=500, chunk_overlap=0)
+    split_documents = text_splitter.split_documents(documents)
+
+    # Transform the split documents into graph format
+    logger.info("Transforming documents to graph format using GlinerGraphTransformer.")
+    graph_documents = graph_transformer.convert_to_graph_documents(split_documents)
+
+    # Add to Neo4j
+    logger.info("Adding graph entities and relationships to Neo4j.")
+    add_graph_to_neo4j(graph_documents)
+
+    logger.info("Documents indexed successfully.")
+    return {"message": "Documents indexed successfully."}
+
+@app.get("/graph_data/")
+async def get_graph_data():
+    logger.info("Fetching graph data from Neo4j.")
+    try:
+        with driver.session() as session:
+            result = session.run(
+                """
+                MATCH (e1:Entity)-[r:RELATED_TO]->(e2:Entity)
+                RETURN e1.name AS source, e1.type AS source_type, e2.name AS target, e2.type AS target_type, r.type AS relationship
+                """
+            )
+            graph_data = [
+                {
+                    "source": record["source"],
+                    "source_type": record["source_type"],
+                    "target": record["target"],
+                    "target_type": record["target_type"],
+                    "relationship": record["relationship"]
+                }
+                for record in result
+            ]
+        logger.info(f"Graph data retrieved: {graph_data}")
+        return {"graph_data": graph_data}
+    except Exception as e:
+        logger.error(f"Error while fetching graph data from Neo4j: {str(e)}")
+        return {"error": "An error occurred while fetching graph data."}
 
 @app.get("/list_entities/")
 async def list_entities():
@@ -85,71 +171,41 @@ async def list_entities():
         logger.error(f"Error while listing entities from Neo4j: {str(e)}")
         return {"error": "An error occurred while listing the entities."}
 
-
-@app.post("/index/")
-async def index_pdfs(
-    folder_path: Optional[str] = Form(None),
-    files: Optional[List[UploadFile]] = File(None)
-):
-    documents = []
-
-    # Handle folder path for directory input
-    if folder_path:
-        if os.path.isdir(folder_path):
-            logger.info(f"Loading documents from folder: {folder_path}")
-            loader = PyPDFDirectoryLoader(folder_path)
-            documents = loader.load()
-        else:
-            logger.error("Invalid folder path provided.")
-            return {"error": "Invalid folder path"}
-
-    # Handle file uploads for individual files
-    elif files:
-        for file in files:
-            file_path = f"./uploaded_files/{file.filename}"
-            logger.info(f"Saving uploaded file: {file.filename}")
-            with open(file_path, "wb") as f:
-                f.write(file.file.read())
-            loader = PyPDFLoader(file_path)
-            documents += loader.load()
-    
-    else:
-        logger.error("No folder path or files provided for indexing.")
-        return {"error": "You must provide either a folder path or files."}
-    
-    # Proceed with document processing
-    logger.info("Splitting documents into smaller chunks.")
-    text_splitter = CharacterTextSplitter(chunk_size=500, chunk_overlap=0)  # Reduce chunk size to avoid truncation
-    split_documents = text_splitter.split_documents(documents)
-
-    for doc in split_documents:
-        # Truncate content only if it exceeds the length allowed by GLiNER
-        if len(doc.page_content) > 384:
-            truncated_content = doc.page_content[:384]
-            logger.warning(f"Document chunk truncated to 384 characters. Original length: {len(doc.page_content)}")
-        else:
-            truncated_content = doc.page_content
-
-        logger.info(f"Extracting entities from document chunk: {truncated_content[:50]}...")
-        try:
-            # Using extract_one instead of extract_many for better control over each chunk
-            entities = gliner_extractor.extract_one(truncated_content)
-            relationships = []  # You should define how to extract relationships here.
-            logger.info(f"Adding extracted entities and relationships to Neo4j for document ID: {doc.metadata.get('source', 'unknown_source')}")
-            add_to_neo4j(doc.metadata.get('source', 'unknown_source'), entities, relationships)
-        except Exception as e:
-            logger.error(f"Error during entity extraction or Neo4j insertion: {str(e)}")
-    
-    logger.info("Documents indexed successfully.")
-    return {"message": "Documents indexed successfully."}
-
-
-# Question Answering Setup (with LLaMA)
+# LLaMA 3.2 Setup for Chat and Q&A
 model_name = "meta-llama/Llama-3.2-3B-Instruct"
+config = AutoConfig.from_pretrained(model_name)
+
+# Ensure rope_scaling follows the expected format for compatibility
+if hasattr(config, "rope_scaling") and config.rope_scaling:
+    config.rope_scaling = {"type": "linear", "factor": 2.0}
+
+# Load model and tokenizer for LLaMA
 tokenizer = AutoTokenizer.from_pretrained(model_name)
-model = AutoModelForCausalLM.from_pretrained(model_name)
-pipe = pipeline("text-generation", model=model, tokenizer=tokenizer)
+model = AutoModelForCausalLM.from_pretrained(model_name, config=config)
+
+# Create HuggingFace pipeline for text generation
+pipe = pipeline("text-generation", model=model, tokenizer=tokenizer, truncation=True, max_new_tokens=100, max_length=512)
 llm = HuggingFacePipeline(pipeline=pipe)
+
+@app.post("/chat/")
+async def chat(query: str):
+    logger.info(f"Processing query using GLiNER and LLaMA: {query}")
+    # Extract entities using GLiNER
+    extracted_entities = gliner_extractor.extract_one(query)
+    
+    # Build additional context with the extracted entities
+    if extracted_entities:
+        additional_context = " ".join([f"{entity.tag} ({entity.kind})" for entity in extracted_entities])
+    else:
+        additional_context = "No entities extracted."
+    
+    # Combine the context and user query
+    full_prompt = f"Context: {additional_context}\nUser query: {query}"
+    
+    # Generate the response using the LLaMA model
+    response = llm.run(full_prompt)
+    
+    return {"response": response, "extracted_entities": extracted_entities}
 
 @app.post("/query/")
 async def query_neo4j(query: str):
