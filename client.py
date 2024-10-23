@@ -1,34 +1,42 @@
 import streamlit as st
 import requests
 import networkx as nx
-import matplotlib.pyplot as plt
+from pyvis.network import Network
+import json
 
-# API URL
-API_URL = "http://127.0.0.1:8008"
+st.set_page_config(page_title="Neo4j Graph Visualization", layout="wide")
+st.title("Neo4j Entity Graph Visualization")
 
-st.title("Entity Graph from PDFs")
-
-# Query input
-query = st.text_input("Enter query:")
-
-if st.button("Search"):
-    # Query FastAPI for entities from Neo4j
-    response = requests.post(f"{API_URL}/query/", json={"query": query})
-    entities = response.json().get("entities", [])
-
-    if entities:
-        st.write("Entities found:")
-        G = nx.Graph()
-
-        # Add nodes to the graph
-        for entity in entities:
-            G.add_node(entity["name"], label=entity["type"])
-            st.write(f"Entity: {entity['name']}, Type: {entity['type']}")
-
-        # Draw the graph
-        plt.figure(figsize=(8, 6))
-        pos = nx.spring_layout(G)
-        nx.draw(G, pos, with_labels=True, node_color="lightblue", font_size=10)
-        st.pyplot(plt)
+# Fetch graph data from FastAPI
+@st.cache_data
+def fetch_graph_data():
+    response = requests.get("http://localhost:8008/graph_data/")
+    if response.status_code == 200:
+        return response.json().get("graph_data", [])
     else:
-        st.write("No entities found.")
+        st.error("Failed to fetch graph data from API")
+        return []
+
+graph_data = fetch_graph_data()
+
+# Create a NetworkX graph from the fetched data
+G = nx.Graph()
+for record in graph_data:
+    source = record["source"]
+    target = record["target"]
+    relationship = record["relationship"]
+
+    # Add nodes and edge
+    G.add_node(source, label=source, type=record["source_type"])
+    G.add_node(target, label=target, type=record["target_type"])
+    G.add_edge(source, target, label=relationship)
+
+# Visualize using PyVis
+net = Network(height="750px", width="100%", bgcolor="#222222", font_color="white")
+net.from_nx(G)
+
+# Create HTML file for pyvis and render it
+net.show("graph.html")
+with open("graph.html", "r", encoding="utf-8") as f:
+    html_content = f.read()
+st.components.v1.html(html_content, height=800)
