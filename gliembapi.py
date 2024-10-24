@@ -1,5 +1,7 @@
 from fastapi import FastAPI, Form
 from typing import Optional
+from langchain.chains import GraphCypherQAChain
+from langchain_community.graphs import Neo4jGraph
 from langchain_community.document_loaders import PyPDFDirectoryLoader
 from langchain_text_splitters import CharacterTextSplitter
 from langchain_experimental.graph_transformers.gliner import GlinerGraphTransformer
@@ -18,6 +20,8 @@ URI = "bolt://localhost:7687"
 USER = "neo4j"
 PASSWORD = "your_password"
 driver = GraphDatabase.driver(URI, auth=(USER, PASSWORD))
+graph = Neo4jGraph(url=URI, username=USER, password=PASSWORD)
+
 
 # Initialize GLiNER for entity extraction (for the chat route)
 gliner_extractor = GLiNERLinkExtractor(
@@ -171,42 +175,6 @@ async def list_entities():
         logger.error(f"Error while listing entities from Neo4j: {str(e)}")
         return {"error": "An error occurred while listing the entities."}
 
-# LLaMA 3.2 Setup for Chat and Q&A
-model_name = "meta-llama/Llama-3.2-3B-Instruct"
-config = AutoConfig.from_pretrained(model_name)
-
-# Ensure rope_scaling follows the expected format for compatibility
-if hasattr(config, "rope_scaling") and config.rope_scaling:
-    config.rope_scaling = {"type": "linear", "factor": 2.0}
-
-# Load model and tokenizer for LLaMA
-tokenizer = AutoTokenizer.from_pretrained(model_name)
-model = AutoModelForCausalLM.from_pretrained(model_name, config=config)
-
-# Create HuggingFace pipeline for text generation
-pipe = pipeline("text-generation", model=model, tokenizer=tokenizer, truncation=True, max_new_tokens=100, max_length=512)
-llm = HuggingFacePipeline(pipeline=pipe)
-
-@app.post("/chat/")
-async def chat(query: str):
-    logger.info(f"Processing query using GLiNER and LLaMA: {query}")
-    # Extract entities using GLiNER
-    extracted_entities = gliner_extractor.extract_one(query)
-    
-    # Build additional context with the extracted entities
-    if extracted_entities:
-        additional_context = " ".join([f"{entity.tag} ({entity.kind})" for entity in extracted_entities])
-    else:
-        additional_context = "No entities extracted."
-    
-    # Combine the context and user query
-    full_prompt = f"Context: {additional_context}\nUser query: {query}"
-    
-    # Generate the response using the LLaMA model
-    response = llm.run(full_prompt)
-    
-    return {"response": response, "extracted_entities": extracted_entities}
-
 @app.post("/query/")
 async def query_neo4j(query: str):
     logger.info(f"Querying Neo4j for: {query}")
@@ -226,3 +194,43 @@ async def query_neo4j(query: str):
     except Exception as e:
         logger.error(f"Error while querying Neo4j: {str(e)}")
         return {"error": "An error occurred while querying the database."}
+
+
+# LLaMA 3.2 Setup for Chat and Q&A
+model_name = "meta-llama/Llama-3.2-3B-Instruct"
+config = AutoConfig.from_pretrained(model_name)
+tokenizer = AutoTokenizer.from_pretrained(model_name)
+model = AutoModelForCausalLM.from_pretrained(model_name, config=config)
+
+# Create HuggingFace pipeline for text generation
+pipe = pipeline("text-generation", model=model, tokenizer=tokenizer, truncation=True, max_new_tokens=100, max_length=512)
+llm = HuggingFacePipeline(pipeline=pipe)
+
+# GraphCypherQAChain for Neo4j Queries
+qa_chain = GraphCypherQAChain.from_llm(llm, graph=graph, verbose=True, allow_dangerous_requests=True)
+
+@app.post("/chat/")
+async def chat(query: str):
+    """
+    Endpoint to handle chat queries using natural language to query Neo4j.
+    """
+    try:
+        # Log the incoming query
+        logger.info(f"Processing query using Neo4j and LLaMA: {query}")
+        
+        # Step 1: Extract the context and response using Neo4j
+        result = qa_chain.invoke({"query": query})
+        
+        # Step 2: Generate the final response using LLaMA
+        final_response = result['result']
+
+        return {
+            "query": query,
+            "response": final_response,
+            "cypher_query": result['intermediate_steps'][0]['query'],  # The Cypher query generated
+            "graph_result": result['intermediate_steps'][1]['context'],  # Data retrieved from the graph
+        }
+    
+    except Exception as e:
+        logger.error(f"Error processing chat query: {str(e)}")
+        return {"error": str(e)}
