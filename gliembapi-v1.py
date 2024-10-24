@@ -1,7 +1,6 @@
-from fastapi import FastAPI, Form, Response
+from fastapi import FastAPI, Form
 from typing import Optional
-from langchain_ollama.embeddings import OllamaEmbeddings
-from langchain_ollama.chat_models import ChatOllama
+from langchain_community.embeddings import OllamaEmbeddings
 from langchain_community.vectorstores import Neo4jVector
 
 from langchain_core.output_parsers import StrOutputParser
@@ -14,41 +13,39 @@ from langchain_text_splitters import CharacterTextSplitter
 from langchain_experimental.graph_transformers.gliner import GlinerGraphTransformer
 from langchain_community.graph_vectorstores.extractors import GLiNERLinkExtractor
 from neo4j import GraphDatabase
+from transformers import pipeline, AutoTokenizer, AutoModelForCausalLM, AutoConfig
 from langchain_core.prompts import PromptTemplate
+from langchain_huggingface import HuggingFacePipeline
 from loguru import logger
 import yaml
 import os
-from langsmith import Client as LangSmith
-from prometheus_client import Counter, Summary
-
-# Prometheus metrics
-REQUEST_COUNT = Counter('request_count', 'Total number of requests')
-REQUEST_LATENCY = Summary('request_latency_seconds', 'Time spent processing request')
-
-# LangSmith client for logging chain runs
-langsmith_client = LangSmith(api_key="LANGCHAIN_API_KEY")
+import torch
 
 app = FastAPI()
 
-# Setup Neo4j connection
+# Neo4j connection setup
 URI = "bolt://localhost:7687"
 USER = "neo4j"
 PASSWORD = "your_password"
 driver = GraphDatabase.driver(URI, auth=(USER, PASSWORD))
 graph = Neo4jGraph(url=URI, username=USER, password=PASSWORD)
 
-# Initialize embeddings using Ollama for embeddings
-ollama_emb = OllamaEmbeddings(model="nomic-embed-text")
 
-# Load configuration for GLiNER entity extraction
+ollama_emb = OllamaEmbeddings(
+    model="nomic-embed-text",
+)
+
 with open('gli_config.yml', 'r') as file:
     config = yaml.safe_load(file)
 
+
+# Initialize GLiNER for entity extraction (for the chat route)
 gliner_extractor = GLiNERLinkExtractor(
     labels=config["labels"],
     model="urchade/gliner_mediumv2.1"
 )
 
+# GlinerGraphTransformer setup
 graph_transformer = GlinerGraphTransformer(
     allowed_nodes=config["allowed_nodes"],
     allowed_relationships=config["allowed_relationships"],
@@ -56,19 +53,24 @@ graph_transformer = GlinerGraphTransformer(
     glirel_model="jackboyla/glirel_beta",
     entity_confidence_threshold=0.1,
     relationship_confidence_threshold=0.1,
+    device="cuda" if torch.cuda.is_available() else "cpu"
 )
 
 # Function to add graph nodes and edges to Neo4j
 def add_graph_to_neo4j(graph_docs):
     with driver.session() as session:
         for graph_doc in graph_docs:
+            # Add nodes to Neo4j
             for node in graph_doc.nodes:
+                logger.info(f"Adding node to Neo4j: {node}")
                 session.run(
                     "MERGE (e:Entity {name: $name, type: $type})",
                     {"name": node.id, "type": node.type}
                 )
+            # Add edges to Neo4j if they exist
             if hasattr(graph_doc, 'relationships') and graph_doc.relationships:
                 for edge in graph_doc.relationships:
+                    logger.info(f"Adding edge to Neo4j: {edge}")
                     session.run(
                         """
                         MATCH (source:Entity {name: $source}), (target:Entity {name: $target})
@@ -77,92 +79,45 @@ def add_graph_to_neo4j(graph_docs):
                         {"source": edge.source.id, "target": edge.target.id, "type": edge.type}
                     )
 
-# Helper function for LangSmith logging
-def log_chain_run(chain_name: str, input_data: str, output_data: str, metadata: dict):
-    try:
-        langsmith_client.create_run(
-            name=chain_name,
-            inputs=input_data,
-            outputs=output_data,
-            metadata=metadata,
-        )
-        logger.info(f"Logged {chain_name} run to LangSmith.")
-    except Exception as e:
-        logger.error(f"Error logging to LangSmith: {e}")
 
-# Indexing route: Index PDF documents and create vector and fulltext indexes in Neo4j
+
 @app.post("/index/")
-@REQUEST_LATENCY.time()
-def index_pdfs(
+async def index_pdfs(
     folder_path: Optional[str] = Form(None)
 ):
-    REQUEST_COUNT.inc()
-    logger.info("Démarrage de l'indexation des PDFs.")
     documents = []
+
+    # Handle folder path for directory input
     if folder_path:
         if os.path.isdir(folder_path):
+            logger.info(f"Loading documents from folder: {folder_path}")
             loader = PyPDFDirectoryLoader(folder_path)
-            try:
-                documents = loader.load()
-                logger.info(f"{len(documents)} documents chargés.")
-            except Exception as e:
-                logger.error(f"Erreur lors du chargement des documents: {e}")
-                return {"error": f"Error loading documents: {str(e)}"}
+            documents = loader.load()
         else:
-            logger.error("Chemin de dossier invalide.")
+            logger.error("Invalid folder path provided.")
             return {"error": "Invalid folder path"}
     else:
-        logger.error("Aucun chemin de dossier fourni.")
+        logger.error("No folder path provided for indexing.")
         return {"error": "You must provide a folder path."}
     
-    # Split documents into chunks for embeddings
+    # Proceed with document processing
+    logger.info("Splitting documents into smaller chunks.")
     text_splitter = CharacterTextSplitter(chunk_size=1000, chunk_overlap=0)
     split_documents = text_splitter.split_documents(documents)
-    logger.info(f"{len(split_documents)} documents après découpage.")
 
-    # Transform documents into graph format for Neo4j
-    try:
-        graph_documents = graph_transformer.convert_to_graph_documents(split_documents)
-        logger.info("Transformation des documents en format graphe terminée.")
-    except Exception as e:
-        logger.error(f"Erreur lors de la transformation en graphe: {e}")
-        return {"error": f"Error transforming documents: {str(e)}"}
+    # Transform the split documents into graph format
+    logger.info("Transforming documents to graph format using GlinerGraphTransformer.")
+    graph_documents = graph_transformer.convert_to_graph_documents(split_documents)
 
-    # Add graph data to Neo4j
-    try:
-        add_graph_to_neo4j(graph_documents)
-        logger.info("Ajout des données graphe dans Neo4j terminé.")
-    except Exception as e:
-        logger.error(f"Erreur lors de l'ajout des données graphe à Neo4j: {e}")
-        return {"error": f"Error adding graph data to Neo4j: {str(e)}"}
+    # Add to Neo4j
+    logger.info("Adding graph entities and relationships to Neo4j.")
+    add_graph_to_neo4j(graph_documents)
 
-    # Create or retrieve indexes for hybrid search
-    index_name = "vector"
-    keyword_index_name = "keyword"
+    logger.info("Documents indexed successfully.")
+    return {"message": "Documents indexed successfully."}
 
-    try:
-        store = Neo4jVector.from_documents(
-            split_documents,
-            embedding=ollama_emb,
-            url=URI,
-            username=USER,
-            password=PASSWORD,
-            index_name=index_name,
-            keyword_index_name=keyword_index_name,
-            search_type="hybrid"
-        )
-        logger.info("Création ou récupération des index de recherche hybride terminée.")
-    except Exception as e:
-        logger.error(f"Erreur lors de la création des index: {e}")
-        return {"error": f"Error creating indexes: {str(e)}"}
-
-    return {"message": "Documents indexed successfully with vector and fulltext indexes."}
-
-# Graph data route: Fetch graph data from Neo4j
 @app.get("/graph_data/")
-@REQUEST_LATENCY.time()
 async def get_graph_data():
-    REQUEST_COUNT.inc()
     logger.info("Fetching graph data from Neo4j.")
     try:
         with driver.session() as session:
@@ -188,11 +143,8 @@ async def get_graph_data():
         logger.error(f"Error while fetching graph data from Neo4j: {str(e)}")
         return {"error": "An error occurred while fetching graph data."}
 
-# List entities route: List all entities in Neo4j
 @app.get("/list_entities/")
-@REQUEST_LATENCY.time()
 async def list_entities():
-    REQUEST_COUNT.inc()
     logger.info("Listing all entities in Neo4j.")
     try:
         with driver.session() as session:
@@ -210,11 +162,8 @@ async def list_entities():
         logger.error(f"Error while listing entities from Neo4j: {str(e)}")
         return {"error": "An error occurred while listing the entities."}
 
-# Query Neo4j route: Query Neo4j for entities
 @app.post("/query/")
-@REQUEST_LATENCY.time()
 async def query_neo4j(query: str):
-    REQUEST_COUNT.inc()
     logger.info(f"Querying Neo4j for: {query}")
     try:
         with driver.session() as session:
@@ -233,12 +182,64 @@ async def query_neo4j(query: str):
         logger.error(f"Error while querying Neo4j: {str(e)}")
         return {"error": "An error occurred while querying the database."}
 
-# Hybrid search route
+
+## ------------------ RAG Chat Setup ------------------ #
+
+tokenizer = AutoTokenizer.from_pretrained("meta-llama/Llama-3.2-3B-Instruct")
+model = AutoModelForCausalLM.from_pretrained("meta-llama/Llama-3.2-3B-Instruct")
+
+# Setup for text generation
+terminators = [tokenizer.eos_token_id, tokenizer.convert_tokens_to_ids("<|eot_id|>")]
+text_generation_pipeline = pipeline(
+    model=model,
+    tokenizer=tokenizer,
+    task="text-generation",
+    temperature=0.2,
+    do_sample=True,
+    repetition_penalty=1.1,
+    return_full_text=False,
+    max_new_tokens=200,
+    eos_token_id=terminators,
+)
+llm = HuggingFacePipeline(pipeline=text_generation_pipeline)
+
+# Prompt template for question answering
+prompt_template = """
+<|start_header_id|>user<|end_header_id|>
+You are an assistant for answering questions about IPM.
+You are given the extracted parts of a long document and a question. Provide a conversational answer.
+If you don't know the answer, just say "I do not know." Don't make up an answer.
+Question: {question}
+Context: {context}<|eot_id|><|start_header_id|>assistant<|end_header_id|>
+"""
+prompt = PromptTemplate(input_variables=["context", "question"], template=prompt_template)
+
+def format_docs(docs):
+    return "\n\n".join(doc.page_content for doc in docs)
+
+prompt_template = """
+<|start_header_id|>user<|end_header_id|>
+You are an assistant for answering questions about IPM.
+You are given the extracted parts of a long document and a question. Provide a conversational answer.
+If you don't know the answer, just say "I do not know." Don't make up an answer.
+Question: {question}
+Context: {context}<|eot_id|><|start_header_id|>assistant<|end_header_id|>
+"""
+
+prompt = PromptTemplate(
+    input_variables=["context", "question"],
+    template=prompt_template,
+)
+
+def format_docs(docs):
+    return "\n\n".join(doc.page_content for doc in docs)
+
+# Hybrid search using Neo4jVector
 @app.post("/search/")
-@REQUEST_LATENCY.time()
 async def hybrid_search(query: str):
-    REQUEST_COUNT.inc()
-    index_name = "vector"
+    logger.info(f"Performing hybrid search for: {query}")
+
+    index_name = "vector"  # Default index
     keyword_index_name = "keyword"
 
     store = Neo4jVector.from_existing_index(
@@ -254,33 +255,14 @@ async def hybrid_search(query: str):
     retriever = store.as_retriever()
     results = retriever.invoke(query)
 
-    # Log search to LangSmith
-    log_chain_run("Hybrid Search", query, results, {"query": query})
-
     return {"results": results}
 
-# Setup for LLM using Ollama chat model for RAG
-llm = ChatOllama(model="llama3.2")
-
-prompt_template = """
-<|start_header_id|>user<|end_header_id|>
-You are an assistant for answering questions about IPM.
-You are given the extracted parts of a long document and a question. Provide a conversational answer.
-If you don't know the answer, just say "I do not know." Don't make up an answer.
-Question: {question}
-Context: {context}<|eot_id|><|start_header_id|>assistant<|end_header_id|>
-"""
-
-prompt = PromptTemplate(input_variables=["context", "question"], template=prompt_template)
-
-def format_docs(docs):
-    return "\n\n".join(doc.page_content for doc in docs)
-
-# Chat endpoint using RAG with ChatOllama
+# RAG Chat Endpoint
 @app.post("/chat/")
-@REQUEST_LATENCY.time()
 async def chat(query: str):
-    REQUEST_COUNT.inc()
+    logger.info(f"Processing chat query: {query}")
+    
+    # Setting up the retriever and chain for RAG
     index_name = "vector"
     keyword_index_name = "keyword"
 
@@ -296,55 +278,69 @@ async def chat(query: str):
     
     retriever = store.as_retriever()
     rag_chain = (
-        {"context": await retriever.invoke() | format_docs, "question": RunnablePassthrough()}
+        {"context": retriever | format_docs, "question": RunnablePassthrough()}
         | prompt
         | llm
         | StrOutputParser()
     )
 
     try:
-        response = await rag_chain.invoke({"question": query})
-        
-        # Log chat response to LangSmith
-        log_chain_run("Chat", query, response, {"query": query})
-
+        response = rag_chain.invoke({"question": query})
         return {"query": query, "response": response}
     
     except Exception as e:
-        logger.error(f"Error during chat query: {str(e)}")
+        logger.error(f"Error processing chat query: {str(e)}")
         return {"error": str(e)}
 
-# Cypher QA route
-@app.post("/cypher_query/")
-@REQUEST_LATENCY.time()
-async def cypher_query(query: str):
-    REQUEST_COUNT.inc()
-    try:
-        qa_chain = GraphCypherQAChain.from_llm(
-            llm=llm, 
-            graph=graph, 
-            verbose=True,
-        )
-        
-        result = qa_chain.invoke({"query": query})
-        cypher_query = result.get('cypher_query', 'No Cypher query generated')
-        final_response = result.get('result', 'No result generated')
 
-        # Log Cypher QA query to LangSmith
-        log_chain_run("Cypher QA", query, final_response, {"cypher_query": cypher_query})
+# ------------------ Cypher Query Route ------------------ #
+
+# Cypher query generation prompt
+cypher_generation_template = """
+Generate a Cypher query to retrieve relevant information from the graph database.
+Schema: {schema}
+Question: {question}
+Cypher query:
+"""
+cypher_prompt = PromptTemplate(input_variables=["schema", "question"], template=cypher_generation_template)
+
+# GraphCypherQAChain for Neo4j Queries
+qa_chain = GraphCypherQAChain.from_llm(
+    llm=llm, 
+    graph=graph, 
+    verbose=True, 
+    cypher_prompt=cypher_prompt,
+    allow_dangerous_requests=True  # Enabling dangerous requests
+)
+
+@app.post("/cypher_query/")
+async def cypher_query(query: str):
+    """
+    Endpoint to handle Cypher queries using Neo4j.
+    """
+    try:
+        logger.info(f"Processing Cypher query: {query}")
+        
+        # Invoke the QA chain to generate the Cypher query and run it
+        result = qa_chain.invoke({"query": query})
+        
+        # Extract Cypher query and results
+        if 'intermediate_steps' in result:
+            cypher_query = result['intermediate_steps'][0]['query']
+            graph_result = result['intermediate_steps'][1].get('context', 'No context available')
+        else:
+            cypher_query = "No Cypher query generated"
+            graph_result = "No graph result available"
+        
+        final_response = result.get('result', 'No result generated')
 
         return {
             "query": query,
-            "cypher_query": cypher_query,
             "response": final_response,
+            "cypher_query": cypher_query,
+            "graph_result": graph_result,
         }
     
     except Exception as e:
-        logger.error(f"Error during Cypher QA: {str(e)}")
+        logger.error(f"Error processing Cypher query: {str(e)}")
         return {"error": str(e)}
-
-# Prometheus metrics endpoint
-@app.get("/metrics")
-async def metrics():
-    from prometheus_client import generate_latest, CONTENT_TYPE_LATEST
-    return Response(generate_latest(), media_type=CONTENT_TYPE_LATEST)
