@@ -27,26 +27,119 @@ graph = Neo4jGraph(url=URI, username=USER, password=PASSWORD)
 # Initialize GLiNER for entity extraction (for the chat route)
 gliner_extractor = GLiNERLinkExtractor(
     labels=[
-        "Board of Directors", 
-        "Audit Committee", 
-        "Chief Financial Officer (CFO)", 
-        "Chief Sustainability Officer", 
-        "Governance and Compliance Committee", 
-        "ESG Funds", 
-        "Risk Manager", 
-        "Institutional Investors", 
-        "Audit Firms", 
-        "Financial Regulatory Authorities", 
-        "Sustainability Committee", 
-        "Accounting Standards Organizations", 
-        "Impact Investment Funds", 
-        "Activist Shareholders", 
-        "Corporate Governance Consultants", 
-        "ESG Certification Bodies", 
-        "Investor Relations Managers", 
-        "Consumer Advocacy Groups", 
-        "ESG Data Providers", 
-        "Financial Analysts"
+        # Corporate Governance & Executive Entities
+        "Board of Directors",
+        "Audit Committee",
+        "Chief Financial Officer (CFO)",
+        "Chief Executive Officer (CEO)",
+        "Chief Operations Officer (COO)",
+        "Chief Sustainability Officer (CSO)",
+        "Chief Technology Officer (CTO)",
+        "Chief Marketing Officer (CMO)",
+        "General Counsel",
+        "Corporate Secretary",
+        "Governance and Compliance Committee",
+        "Risk Manager",
+        "Independent Directors",
+        "Shareholders",
+        "Stakeholders",
+        "Corporate Lawyers",
+        "Investor Relations Managers",
+
+        # Financial Entities
+        "Institutional Investors",
+        "Private Equity Firms",
+        "Hedge Funds",
+        "Pension Funds",
+        "Sovereign Wealth Funds",
+        "Venture Capital Firms",
+        "Investment Banks",
+        "Retail Banks",
+        "Credit Rating Agencies",
+        "Insurance Companies",
+        "Audit Firms",
+        "Tax Advisors",
+        "ESG Funds",
+        "Financial Regulators",
+        "Stock Exchanges",
+        "Monetary Authorities",
+        "Securities Commissions",
+        "Asset Management Firms",
+
+        # ESG & Sustainability Entities
+        "ESG Rating Agencies",
+        "ESG Data Providers",
+        "Sustainability Committee",
+        "Environmental Advocacy Groups",
+        "Human Rights Organizations",
+        "Carbon Credit Traders",
+        "Non-Governmental Organizations (NGOs)",
+        "Social Responsibility Committees",
+        "Labor Unions",
+        "Consumer Advocacy Groups",
+        "Corporate Social Responsibility (CSR) Teams",
+        "Environmental Agencies",
+        "Ethics Committees",
+        "Diversity Officers",
+        "Social Impact Investors",
+
+        # Political & Governmental Entities
+        "Governments",
+        "Government Agencies",
+        "Regulatory Authorities",
+        "Political Parties",
+        "Legislators",
+        "Lobbying Groups",
+        "Public Policy Think Tanks",
+        "Law Enforcement Agencies",
+        "Ministries of Finance",
+        "Foreign Affairs Ministries",
+        "Chambers of Commerce",
+        "Diplomatic Missions",
+        "International Monetary Fund (IMF)",
+        "World Bank",
+        "World Trade Organization (WTO)",
+        "Geopolitical Organizations",
+        "Sanctions Units (e.g., OFAC)",
+
+        # Legal Entities
+        "International Courts",
+        "Corporate Legal Departments",
+        "Law Firms",
+        "Compliance Officers",
+        "Anti-Corruption Watchdogs",
+        "Dispute Resolution Bodies",
+        "Intellectual Property Offices",
+        "Data Protection Authorities",
+        "Cybersecurity Law Firms",
+        "Human Rights Lawyers",
+        "Market Competition Authorities",
+        "Antitrust Authorities",
+        "Sanctioning Bodies",
+
+        # Media & Civil Society Entities
+        "News Agencies",
+        "Investigative Reporters",
+        "Whistleblower Organizations",
+        "Transparency International",
+        "Civil Rights Groups",
+        "Freedom of Information Watchdogs",
+        "NGOs Focused on Corruption",
+        "Public Relations Firms",
+        "Civil Liberties Organizations",
+        "Journalists",
+
+        # Geopolitical & Intelligence Entities
+        "National Intelligence Agencies",
+        "Military Organizations",
+        "Defense Contractors",
+        "Geopolitical Analysts",
+        "Global Risk Consultancies",
+        "Strategic Intelligence Teams",
+        "Counterterrorism Units",
+        "Sanctions Enforcement Units",
+        "National Security Agencies",
+        "Political Risk Advisory Firms"
     ],
     model="urchade/gliner_mediumv2.1"
 )
@@ -54,17 +147,117 @@ gliner_extractor = GLiNERLinkExtractor(
 # GlinerGraphTransformer setup
 graph_transformer = GlinerGraphTransformer(
     allowed_nodes=[
-        "Board of Directors", "Audit Committee", "Chief Financial Officer (CFO)",
-        "Chief Sustainability Officer", "Governance and Compliance Committee",
-        "ESG Funds", "Risk Manager", "Institutional Investors",
-        "Audit Firms", "Financial Regulatory Authorities",
-        "Sustainability Committee", "Accounting Standards Organizations",
-        "Impact Investment Funds", "Activist Shareholders",
-        "Corporate Governance Consultants", "ESG Certification Bodies",
-        "Investor Relations Managers", "Consumer Advocacy Groups",
-        "ESG Data Providers", "Financial Analysts"
+        # Governance Nodes
+        "Board of Directors",
+        "Audit Committee",
+        "Chief Financial Officer (CFO)",
+        "Chief Executive Officer (CEO)",
+        "Chief Operations Officer (COO)",
+        "Chief Sustainability Officer (CSO)",
+        "Chief Technology Officer (CTO)",
+        "Governance and Compliance Committee",
+        "Independent Directors",
+        "Company Executives",
+        "Shareholders",
+        "Stakeholders",
+        "Corporate Lawyers",
+
+        # Financial Nodes
+        "Institutional Investors",
+        "Hedge Funds",
+        "Private Equity Firms",
+        "Venture Capital Firms",
+        "Banks",
+        "Investment Banks",
+        "Credit Rating Agencies",
+        "Sovereign Wealth Funds",
+        "Monetary Authorities",
+        "Pension Funds",
+        "Audit Firms",
+        "ESG Funds",
+        "Financial Analysts",
+        "Corporate Creditors",
+        "Debt Holders",
+
+        # ESG & Sustainability Nodes
+        "ESG Rating Agencies",
+        "ESG Data Providers",
+        "Environmental Agencies",
+        "Human Rights Organizations",
+        "Carbon Trading Firms",
+        "Social Responsibility Committees",
+        "Environmental Advocacy Groups",
+        "NGOs",
+        "Corporate Social Responsibility (CSR) Teams",
+        "Consumer Advocacy Groups",
+
+        # Political Nodes
+        "Governments",
+        "Political Parties",
+        "Regulatory Authorities",
+        "Geopolitical Organizations",
+        "Diplomatic Missions",
+        "Public Policy Think Tanks",
+        "Chambers of Commerce",
+        "Law Enforcement Agencies",
+        "Customs and Border Protection",
+        "International Trade Organizations",
+        "International Monetary Fund (IMF)",
+
+        # Legal Nodes
+        "International Courts",
+        "Corporate Legal Departments",
+        "Law Firms",
+        "Dispute Resolution Bodies",
+        "Antitrust Authorities",
+        "Market Competition Authorities",
+        "Compliance Officers",
+        "Data Protection Authorities",
+        "Anti-Corruption Watchdogs",
+
+        # Geopolitical Nodes
+        "National Intelligence Agencies",
+        "Military Organizations",
+        "Defense Contractors",
+        "National Security Agencies",
+        "Political Risk Analysts",
+        "Strategic Intelligence Teams",
+        "Sanctions Enforcement Bodies",
+
+        # Media & Civil Society Nodes
+        "News Agencies",
+        "Journalists",
+        "Investigative Reporters",
+        "Whistleblower Organizations",
+        "Transparency International",
+        "Civil Rights Groups",
+        "Public Relations Firms",
+        "Human Rights Watchdogs"
     ],
-    allowed_relationships=["collaborates_with", "reports_to", "influences"],
+    allowed_relationships=[
+        "collaborates_with",
+        "reports_to",
+        "influences",
+        "owns_shares_in",
+        "funds",
+        "sanctions",
+        "certifies",
+        "regulates",
+        "audits",
+        "supplies_to",
+        "monitors",
+        "investigates",
+        "prosecutes",
+        "imposes_sanctions_on",
+        "enforces",
+        "litigates",
+        "lobbies",
+        "lends_to",
+        "provides_services_to",
+        "trades_with",
+        "consults_for",
+        "partners_with"
+    ],
     gliner_model="urchade/gliner_mediumv2.1",
     glirel_model="jackboyla/glirel_beta",
     entity_confidence_threshold=0.1,
@@ -236,14 +429,25 @@ async def chat(query: str):
         # Step 1: Extract the context and response using Neo4j
         result = qa_chain.invoke({"query": query})
         
+        # Log the full result for debugging purposes
+        logger.info(f"Full result: {result}")
+
+        # Check if 'intermediate_steps' is available before accessing it
+        if 'intermediate_steps' in result:
+            cypher_query = result['intermediate_steps'][0]['query']
+            graph_result = result['intermediate_steps'][1].get('context', 'No context available')
+        else:
+            cypher_query = "No Cypher query generated"
+            graph_result = "No graph result available"
+        
         # Step 2: Generate the final response using LLaMA
-        final_response = result['result']
+        final_response = result.get('result', 'No result generated')
 
         return {
             "query": query,
             "response": final_response,
-            "cypher_query": result['intermediate_steps'][0]['query'],  # The Cypher query generated
-            "graph_result": result['intermediate_steps'][1]['context'],  # Data retrieved from the graph
+            "cypher_query": cypher_query,  # The Cypher query generated
+            "graph_result": graph_result,  # Data retrieved from the graph
         }
     
     except Exception as e:
