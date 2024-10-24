@@ -11,6 +11,7 @@ from transformers import pipeline, AutoTokenizer, AutoModelForCausalLM, AutoConf
 from langchain_core.prompts import PromptTemplate
 from langchain_huggingface import HuggingFacePipeline
 from loguru import logger
+import yaml
 import os
 import torch
 
@@ -24,240 +25,20 @@ driver = GraphDatabase.driver(URI, auth=(USER, PASSWORD))
 graph = Neo4jGraph(url=URI, username=USER, password=PASSWORD)
 
 
+with open('gli_config.yaml', 'r') as file:
+    config = yaml.safe_load(file)
+
+
 # Initialize GLiNER for entity extraction (for the chat route)
 gliner_extractor = GLiNERLinkExtractor(
-    labels=[
-        # Corporate Governance & Executive Entities
-        "Board of Directors",
-        "Audit Committee",
-        "Chief Financial Officer (CFO)",
-        "Chief Executive Officer (CEO)",
-        "Chief Operations Officer (COO)",
-        "Chief Sustainability Officer (CSO)",
-        "Chief Technology Officer (CTO)",
-        "Chief Marketing Officer (CMO)",
-        "General Counsel",
-        "Corporate Secretary",
-        "Governance and Compliance Committee",
-        "Risk Manager",
-        "Independent Directors",
-        "Shareholders",
-        "Stakeholders",
-        "Corporate Lawyers",
-        "Investor Relations Managers",
-
-        # Financial Entities
-        "Institutional Investors",
-        "Private Equity Firms",
-        "Hedge Funds",
-        "Pension Funds",
-        "Sovereign Wealth Funds",
-        "Venture Capital Firms",
-        "Investment Banks",
-        "Retail Banks",
-        "Credit Rating Agencies",
-        "Insurance Companies",
-        "Audit Firms",
-        "Tax Advisors",
-        "ESG Funds",
-        "Financial Regulators",
-        "Stock Exchanges",
-        "Monetary Authorities",
-        "Securities Commissions",
-        "Asset Management Firms",
-
-        # ESG & Sustainability Entities
-        "ESG Rating Agencies",
-        "ESG Data Providers",
-        "Sustainability Committee",
-        "Environmental Advocacy Groups",
-        "Human Rights Organizations",
-        "Carbon Credit Traders",
-        "Non-Governmental Organizations (NGOs)",
-        "Social Responsibility Committees",
-        "Labor Unions",
-        "Consumer Advocacy Groups",
-        "Corporate Social Responsibility (CSR) Teams",
-        "Environmental Agencies",
-        "Ethics Committees",
-        "Diversity Officers",
-        "Social Impact Investors",
-
-        # Political & Governmental Entities
-        "Governments",
-        "Government Agencies",
-        "Regulatory Authorities",
-        "Political Parties",
-        "Legislators",
-        "Lobbying Groups",
-        "Public Policy Think Tanks",
-        "Law Enforcement Agencies",
-        "Ministries of Finance",
-        "Foreign Affairs Ministries",
-        "Chambers of Commerce",
-        "Diplomatic Missions",
-        "International Monetary Fund (IMF)",
-        "World Bank",
-        "World Trade Organization (WTO)",
-        "Geopolitical Organizations",
-        "Sanctions Units (e.g., OFAC)",
-
-        # Legal Entities
-        "International Courts",
-        "Corporate Legal Departments",
-        "Law Firms",
-        "Compliance Officers",
-        "Anti-Corruption Watchdogs",
-        "Dispute Resolution Bodies",
-        "Intellectual Property Offices",
-        "Data Protection Authorities",
-        "Cybersecurity Law Firms",
-        "Human Rights Lawyers",
-        "Market Competition Authorities",
-        "Antitrust Authorities",
-        "Sanctioning Bodies",
-
-        # Media & Civil Society Entities
-        "News Agencies",
-        "Investigative Reporters",
-        "Whistleblower Organizations",
-        "Transparency International",
-        "Civil Rights Groups",
-        "Freedom of Information Watchdogs",
-        "NGOs Focused on Corruption",
-        "Public Relations Firms",
-        "Civil Liberties Organizations",
-        "Journalists",
-
-        # Geopolitical & Intelligence Entities
-        "National Intelligence Agencies",
-        "Military Organizations",
-        "Defense Contractors",
-        "Geopolitical Analysts",
-        "Global Risk Consultancies",
-        "Strategic Intelligence Teams",
-        "Counterterrorism Units",
-        "Sanctions Enforcement Units",
-        "National Security Agencies",
-        "Political Risk Advisory Firms"
-    ],
+    labels=config["gliner"]["labels"],
     model="urchade/gliner_mediumv2.1"
 )
 
 # GlinerGraphTransformer setup
 graph_transformer = GlinerGraphTransformer(
-    allowed_nodes=[
-        # Governance Nodes
-        "Board of Directors",
-        "Audit Committee",
-        "Chief Financial Officer (CFO)",
-        "Chief Executive Officer (CEO)",
-        "Chief Operations Officer (COO)",
-        "Chief Sustainability Officer (CSO)",
-        "Chief Technology Officer (CTO)",
-        "Governance and Compliance Committee",
-        "Independent Directors",
-        "Company Executives",
-        "Shareholders",
-        "Stakeholders",
-        "Corporate Lawyers",
-
-        # Financial Nodes
-        "Institutional Investors",
-        "Hedge Funds",
-        "Private Equity Firms",
-        "Venture Capital Firms",
-        "Banks",
-        "Investment Banks",
-        "Credit Rating Agencies",
-        "Sovereign Wealth Funds",
-        "Monetary Authorities",
-        "Pension Funds",
-        "Audit Firms",
-        "ESG Funds",
-        "Financial Analysts",
-        "Corporate Creditors",
-        "Debt Holders",
-
-        # ESG & Sustainability Nodes
-        "ESG Rating Agencies",
-        "ESG Data Providers",
-        "Environmental Agencies",
-        "Human Rights Organizations",
-        "Carbon Trading Firms",
-        "Social Responsibility Committees",
-        "Environmental Advocacy Groups",
-        "NGOs",
-        "Corporate Social Responsibility (CSR) Teams",
-        "Consumer Advocacy Groups",
-
-        # Political Nodes
-        "Governments",
-        "Political Parties",
-        "Regulatory Authorities",
-        "Geopolitical Organizations",
-        "Diplomatic Missions",
-        "Public Policy Think Tanks",
-        "Chambers of Commerce",
-        "Law Enforcement Agencies",
-        "Customs and Border Protection",
-        "International Trade Organizations",
-        "International Monetary Fund (IMF)",
-
-        # Legal Nodes
-        "International Courts",
-        "Corporate Legal Departments",
-        "Law Firms",
-        "Dispute Resolution Bodies",
-        "Antitrust Authorities",
-        "Market Competition Authorities",
-        "Compliance Officers",
-        "Data Protection Authorities",
-        "Anti-Corruption Watchdogs",
-
-        # Geopolitical Nodes
-        "National Intelligence Agencies",
-        "Military Organizations",
-        "Defense Contractors",
-        "National Security Agencies",
-        "Political Risk Analysts",
-        "Strategic Intelligence Teams",
-        "Sanctions Enforcement Bodies",
-
-        # Media & Civil Society Nodes
-        "News Agencies",
-        "Journalists",
-        "Investigative Reporters",
-        "Whistleblower Organizations",
-        "Transparency International",
-        "Civil Rights Groups",
-        "Public Relations Firms",
-        "Human Rights Watchdogs"
-    ],
-    allowed_relationships=[
-        "collaborates_with",
-        "reports_to",
-        "influences",
-        "owns_shares_in",
-        "funds",
-        "sanctions",
-        "certifies",
-        "regulates",
-        "audits",
-        "supplies_to",
-        "monitors",
-        "investigates",
-        "prosecutes",
-        "imposes_sanctions_on",
-        "enforces",
-        "litigates",
-        "lobbies",
-        "lends_to",
-        "provides_services_to",
-        "trades_with",
-        "consults_for",
-        "partners_with"
-    ],
+    allowed_nodes=config["gliner"]["allowed_nodes"],
+    allowed_relationships=config["gliner"]["allowed_relationships"],
     gliner_model="urchade/gliner_mediumv2.1",
     glirel_model="jackboyla/glirel_beta",
     entity_confidence_threshold=0.1,
@@ -287,6 +68,8 @@ def add_graph_to_neo4j(graph_docs):
                         """,
                         {"source": edge.source.id, "target": edge.target.id, "type": edge.type}
                     )
+
+
 
 @app.post("/index/")
 async def index_pdfs(
