@@ -8,6 +8,7 @@ from langchain_experimental.graph_transformers.gliner import GlinerGraphTransfor
 from langchain_community.graph_vectorstores.extractors import GLiNERLinkExtractor
 from neo4j import GraphDatabase
 from transformers import pipeline, AutoTokenizer, AutoModelForCausalLM, AutoConfig
+from langchain_core.prompts import PromptTemplate
 from langchain_huggingface import HuggingFacePipeline
 from loguru import logger
 import os
@@ -198,16 +199,30 @@ async def query_neo4j(query: str):
 
 # LLaMA 3.2 Setup for Chat and Q&A
 model_name = "meta-llama/Llama-3.2-3B-Instruct"
-config = AutoConfig.from_pretrained(model_name)
 tokenizer = AutoTokenizer.from_pretrained(model_name)
-model = AutoModelForCausalLM.from_pretrained(model_name, config=config)
+model = AutoModelForCausalLM.from_pretrained(model_name)
 
 # Create HuggingFace pipeline for text generation
 pipe = pipeline("text-generation", model=model, tokenizer=tokenizer, truncation=True, max_new_tokens=100, max_length=512)
 llm = HuggingFacePipeline(pipeline=pipe)
 
-# GraphCypherQAChain for Neo4j Queries
-qa_chain = GraphCypherQAChain.from_llm(llm, graph=graph, verbose=True, allow_dangerous_requests=True)
+# Fix the prompt template for Cypher query generation
+cypher_generation_template = """
+Generate a Cypher query to retrieve relevant information from the graph database.
+Schema: {schema}
+Question: {question}
+Cypher query:
+"""
+cypher_prompt = PromptTemplate(input_variables=["schema", "question"], template=cypher_generation_template)
+
+# GraphCypherQAChain for Neo4j Queries, with allow_dangerous_requests=True
+qa_chain = GraphCypherQAChain.from_llm(
+    llm=llm, 
+    graph=graph, 
+    verbose=True, 
+    cypher_prompt=cypher_prompt,
+    allow_dangerous_requests=True  # Important to allow Cypher queries with potentially high risks
+)
 
 @app.post("/chat/")
 async def chat(query: str):
