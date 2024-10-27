@@ -236,7 +236,7 @@ async def create_document(document: DocumentCreate):
 # Route for folder-based document creation
 @app.post("/documents/from-folder/", response_model=List[str])
 @REQUEST_LATENCY.time()
-async def create_documents_from_folder(folder_path: str = Form(...)):
+def create_documents_from_folder(folder_path: str = Form("/home/pi/Documents/IF-SRV/4pdfs_subset/")):
     """
     This endpoint accepts a folder path that contains PDF files. 
     The PDF files are processed, stored in Neo4j, and indexed for search.
@@ -269,7 +269,7 @@ async def create_documents_from_folder(folder_path: str = Form(...)):
                         content=split_doc.page_content,
                         metadata=split_doc.metadata,
                     )
-                    doc_id = await Neo4jCRUD.create_document(session, doc_create)
+                    doc_id = Neo4jCRUD.create_document(session, doc_create)
                     
                     # Create embeddings and store in vector index
                     embeddings = ollama_emb.embed_documents([split_doc.page_content])
