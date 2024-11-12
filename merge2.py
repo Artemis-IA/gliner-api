@@ -1,6 +1,6 @@
 import os, time, json, yaml
 from pathlib import Path
-from typing import List, Tuple, Optional, Dict, Any
+from typing import List, Tuple, Optional, Dict, Any, Iterator
 import aiofiles
 from fastapi import FastAPI, File, Query, UploadFile, HTTPException, Form, Response
 from fastapi.responses import JSONResponse
@@ -21,17 +21,20 @@ from docling_core.types.doc import PictureItem
 import semchunk
 from docling_core.transforms.chunker.hierarchical_chunker import DocChunk
 from docling_core.transforms.chunker import BaseChunk, BaseChunker, DocMeta, HierarchicalChunker
+from langchain_core.documents import Document
 from langchain_ollama.embeddings import OllamaEmbeddings
 from langchain_community.vectorstores import Neo4jVector
+from langchain_postgres import PGVector
 from langchain_text_splitters import RecursiveCharacterTextSplitter
 from langchain_experimental.graph_transformers.gliner import GlinerGraphTransformer
 from langchain_community.graph_vectorstores.extractors import GLiNERLinkExtractor
 from langchain_community.document_loaders import PyPDFDirectoryLoader
 from prometheus_client import Counter, Histogram, Gauge, start_http_server
+from transformers import AutoTokenizer
 import boto3, re
 from loguru import logger
 from codecarbon import EmissionsTracker
-from pydantic import BaseModel
+from pydantic import BaseModel, PositiveInt
 from neo4j import GraphDatabase
 from dotenv import load_dotenv
 import mlflow
@@ -86,8 +89,15 @@ for bucket in [input_bucket, output_bucket, layouts_bucket]:
         s3_client.create_bucket(Bucket=bucket)
         logger.info(f"Bucket '{bucket}' created.")
 
-# Initialisation du modèle et de l'embedding
+# Initialisation du modèle d'embedding Ollama et PGVector
 ollama_emb = OllamaEmbeddings(model="llama3.2")
+connection_string = "postgresql+psycopg://postgre_user:postgre_password@localhost/postgre_db"
+vectorstore = PGVector(
+    embeddings=ollama_emb,
+    collection_name="document_embeddings",
+    connection=connection_string,
+    use_jsonb=True
+)
 text_splitter = RecursiveCharacterTextSplitter(chunk_size=1000)
 
 # GLiNER extractor and transformer
@@ -270,6 +280,204 @@ def export_documents(conv_results: List[ConversionResult], output_dir: Path, exp
 
     return success_count, partial_success_count, failure_count
 
+EMBED_MODEL_ID = "sentence-transformers/all-MiniLM-L6-v2"
+TOKENIZER = AutoTokenizer.from_pretrained(EMBED_MODEL_ID)
+
+def count_tokens(text: list[str] | None, tokenizer):
+    if text is None:
+        return 0
+    elif isinstance(text, list):
+        total = sum(count_tokens(t, tokenizer) for t in text)
+        return total
+    return len(tokenizer.tokenize(text, max_length=None))
+
+def make_splitter(tokenizer, chunk_size):
+    return semchunk.chunkerify(tokenizer, chunk_size)
+
+def doc_chunk_length(doc_chunk: DocChunk, tokenizer):
+    text_length = count_tokens(doc_chunk.text, tokenizer)
+    headings_length = count_tokens(doc_chunk.meta.headings, tokenizer)
+    captions_length = count_tokens(doc_chunk.meta.captions, tokenizer)
+    total = text_length + headings_length + captions_length
+    return {"total": total, "text": text_length, "other": total - text_length}
+
+def make_chunk_from_doc_items(
+    doc_chunk: DocChunk, window_text: str, window_start: int, window_end: int
+) -> DocChunk:
+    meta = DocMeta(
+        doc_items=doc_chunk.meta.doc_items[window_start:window_end + 1],
+        headings=doc_chunk.meta.headings,
+        captions=doc_chunk.meta.captions,
+    )
+    new_chunk = DocChunk(text=window_text, meta=meta)
+    return new_chunk
+
+def merge_text(t1: str, t2: str) -> str:
+    if t1 == "":
+        return t2
+    elif t2 == "":
+        return t1
+    else:
+        return t1 + "\n" + t2
+
+def split_by_doc_items(doc_chunk: DocChunk, tokenizer, chunk_size: int) -> List[DocChunk]:
+    if doc_chunk.meta.doc_items is None or len(doc_chunk.meta.doc_items) <= 1:
+        return [doc_chunk]
+    length = doc_chunk_length(doc_chunk, tokenizer)
+    if length["total"] <= chunk_size:
+        return [doc_chunk]
+    else:
+        chunks = []
+        window_start = 0
+        window_end = 0
+        window_text = ""
+        window_text_length = 0
+        other_length = length["other"]
+        l = len(doc_chunk.meta.doc_items)
+        while window_end < l:
+            doc_item = doc_chunk.meta.doc_items[window_end]
+            text = doc_item.text
+            text_length = count_tokens(text, tokenizer)
+            if (
+                text_length + window_text_length + other_length < chunk_size
+                and window_end < l - 1
+            ):
+                window_end += 1
+                window_text_length += text_length
+                window_text = merge_text(window_text, text)
+            elif text_length + window_text_length + other_length < chunk_size:
+                window_text = merge_text(window_text, text)
+                new_chunk = make_chunk_from_doc_items(
+                    doc_chunk, window_text, window_start, window_end
+                )
+                chunks.append(new_chunk)
+                window_end = l
+            elif window_start == window_end:
+                window_text = merge_text(window_text, text)
+                new_chunk = make_chunk_from_doc_items(
+                    doc_chunk, window_text, window_start, window_end
+                )
+                chunks.append(new_chunk)
+                window_start = window_end + 1
+                window_end = window_start
+                window_text = ""
+                window_text_length = 0
+            else:
+                new_chunk = make_chunk_from_doc_items(
+                    doc_chunk, window_text, window_start, window_end - 1
+                )
+                chunks.append(new_chunk)
+                window_start = window_end
+                window_text = ""
+                window_text_length = 0
+
+        return chunks
+
+def split_using_plain_text(
+    doc_chunk: DocChunk,
+    tokenizer,
+    plain_text_splitter,
+    chunk_size: int,
+) -> List[DocChunk]:
+    lengths = doc_chunk_length(doc_chunk, tokenizer)
+    if lengths["total"] <= chunk_size:
+        return [doc_chunk]
+    else:
+        available_length = chunk_size - lengths["other"]
+        if available_length <= 0:
+            raise ValueError(
+                "Headers and captions for this chunk are longer than the total amount of size for the chunk. This is not supported now."
+            )
+        text = doc_chunk.text
+        segments = plain_text_splitter.chunk(text)
+        chunks = []
+        for s in segments:
+            new_chunk = DocChunk(text=s, meta=doc_chunk.meta)
+            chunks.append(new_chunk)
+        return chunks
+
+def merge_chunks_with_matching_metadata(chunks, tokenizer, chunk_size):
+    output_chunks = []
+    window_start = 0
+    window_end = 0
+    l = len(chunks)
+    while window_end < l:
+        chunk = chunks[window_end]
+        lengths = doc_chunk_length(chunk, tokenizer)
+        headings_and_captions = (chunk.meta.headings, chunk.meta.captions)
+        if window_start == window_end:
+            current_headings_and_captions = headings_and_captions
+            window_text = chunk.text
+            window_other_length = lengths["other"]
+            window_text_length = lengths["text"]
+            window_items = chunk.meta.doc_items
+            window_end += 1
+            first_chunk_of_window = chunk
+        elif (
+            headings_and_captions == current_headings_and_captions
+            and window_text_length + window_other_length + lengths["text"] <= chunk_size
+        ):
+            window_text = merge_text(window_text, chunk.text)
+            window_text_length += lengths["text"]
+            window_items = window_items + chunk.meta.doc_items
+            window_end += 1
+        else:
+            if window_start + 1 == window_end:
+                output_chunks.append(first_chunk_of_window)
+            else:
+                new_meta = DocMeta(
+                    doc_items=window_items,
+                    headings=headings_and_captions[0],
+                    captions=headings_and_captions[1],
+                )
+                new_chunk = DocChunk(text=window_text, meta=new_meta)
+                output_chunks.append(new_chunk)
+            window_start = window_end
+
+    return output_chunks
+
+def merge_chunks_with_mismatching_metadata(chunks, *_):
+    return chunks
+
+def merge_chunks(chunks, tokenizer, chunk_size):
+    initial_merged_chunks = merge_chunks_with_matching_metadata(
+        chunks, tokenizer, chunk_size
+    )
+    final_merged_chunks = merge_chunks_with_mismatching_metadata(
+        initial_merged_chunks, tokenizer, chunk_size
+    )
+    return final_merged_chunks
+
+def adjust_chunks_for_fixed_size(doc, original_chunks, tokenizer, splitter, chunk_size):
+    chunks_after_splitting_by_items = []
+    for chunk in original_chunks:
+        chunk_split_by_doc_items = split_by_doc_items(chunk, tokenizer, chunk_size)
+        chunks_after_splitting_by_items.extend(chunk_split_by_doc_items)
+    chunks_after_splitting_recursively = []
+    for chunk in chunks_after_splitting_by_items:
+        chunk_split_recursively = split_using_plain_text(
+            chunk, tokenizer, splitter, chunk_size
+        )
+        chunks_after_splitting_recursively.extend(chunk_split_recursively)
+    chunks_after_merging = merge_chunks(
+        chunks_after_splitting_recursively, tokenizer, chunk_size
+    )
+    return chunks_after_merging
+
+class MaxTokenLimitingChunkerWithMerging(BaseChunker):
+    inner_chunker: BaseChunker = HierarchicalChunker()
+    max_tokens: PositiveInt = 512
+    embedding_model_id: str
+
+    def chunk(self, dl_doc: DoclingDocument, **kwargs) -> Iterator[BaseChunk]:
+        preliminary_chunks = self.inner_chunker.chunk(dl_doc=dl_doc, **kwargs)
+        tokenizer = AutoTokenizer.from_pretrained(self.embedding_model_id)
+        splitter = make_splitter(tokenizer, self.max_tokens)
+        output_chunks = adjust_chunks_for_fixed_size(
+            dl_doc, preliminary_chunks, tokenizer, splitter, self.max_tokens
+        )
+        return iter(output_chunks)
+    
 @app.post("/upload/")
 async def upload_files(
     files: List[UploadFile] = File(...),
@@ -301,12 +509,18 @@ async def upload_files(
         logger.info(f"Converting document: {doc_path}")
         result = await model_manager.process_document(doc_converter, doc_path)
         
-        if result:
+        if result and result.status == ConversionStatus.SUCCESS:
             results.append(result)
             export_results = export_documents([result], OUTPUT_DIR, export_formats, export_figures, export_tables)
 
-    logger.info(f"All documents processed. Total successful: {len(results)}")
-    return {"message": "Documents processed successfully", "uploaded_to": output_bucket}
+            # Chunk the document, generate embeddings, and store in PGVector
+            chunker = MaxTokenLimitingChunkerWithMerging(max_tokens=512, embedding_model_id=EMBED_MODEL_ID)
+            chunks = list(chunker.chunk(dl_doc=result.document))
+
+            documents = [Document(page_content=chunk.text, metadata={"file_name": doc_path.name}) for chunk in chunks]
+            vectorstore.add_documents(documents=documents)
+
+    return {"message": "Documents processed and stored successfully", "uploaded_to": output_bucket}
 
 
 @app.post("/upload_path/")
@@ -332,18 +546,20 @@ async def upload_path(
     
     for doc_path in input_file_paths:
         input_s3_url = upload_to_s3(doc_path, input_bucket)
-        logger.info(f"Uploaded original file '{doc_path.name}' to input bucket: {input_s3_url}")
-        
-        logger.info(f"Converting document: {doc_path}")
         result = await model_manager.process_document(doc_converter, doc_path)
         
-        if result:
+        if result and result.status == ConversionStatus.SUCCESS:
             results.append(result)
             export_results = export_documents([result], OUTPUT_DIR, export_formats, export_figures, export_tables)
 
-    logger.info(f"Directory {file_path} processed. Total successful: {len(results)}")
-    return {"message": "Directory processed successfully", "uploaded_to": output_bucket}
+            # Chunk the document, generate embeddings, and store in PGVector
+            chunker = MaxTokenLimitingChunkerWithMerging(max_tokens=512, embedding_model_id=EMBED_MODEL_ID)
+            chunks = list(chunker.chunk(dl_doc=result.document))
 
+            documents = [Document(page_content=chunk.text, metadata={"file_name": doc_path.name}) for chunk in chunks]
+            vectorstore.add_documents(documents=documents)
+
+    return {"message": "Directory processed and stored successfully", "uploaded_to": output_bucket}
 
 @app.post("/index_documents/")
 def index_documents(folder_path: str):
