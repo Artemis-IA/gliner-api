@@ -10,6 +10,7 @@ from sqlalchemy import create_engine, Column, String, Integer
 from sqlalchemy.ext.declarative import declarative_base
 from sqlalchemy.orm import sessionmaker
 import torch
+from huggingface_hub import HfApi, ModelInfo
 import psutil, GPUtil
 from docling.document_converter import DocumentConverter, PdfFormatOption
 from docling.datamodel.base_models import InputFormat
@@ -56,27 +57,44 @@ MODEL_LOG_COUNT = Counter("model_log_count", "Nombre de modèles enregistrés da
 # Logger Setup
 logger.add("logs/conversion_{time}.log", rotation="1 day", retention="7 days", level="INFO")
 
-# Neo4j and MLflow setup
+# Neo4j setup
 URI = "bolt://localhost:7687"
 USER, PASSWORD = "neo4j", "your_password"
 driver = GraphDatabase.driver(URI, auth=(USER, PASSWORD))
-mlflow.set_tracking_uri("http://localhost:5002")
 
-# PostgreSQL setup
-DATABASE_URL = "postgresql://postgre_user:postgre_password@localhost/postgre_db"
+# PostgreSQL setup for MLflow Tracking and Model Registry
+POSTGRES_USER = os.getenv("POSTGRES_USER", "postgre_user")
+POSTGRES_PASSWORD = os.getenv("POSTGRES_PASSWORD", "postgre_password")
+POSTGRES_HOST = os.getenv("POSTGRES_HOST", "localhost")
+POSTGRES_DB = os.getenv("POSTGRES_DB", "postgre_db")
+DATABASE_URL = f"postgresql://{POSTGRES_USER}:{POSTGRES_PASSWORD}@{POSTGRES_HOST}/{POSTGRES_DB}"
+
+# Set PostgreSQL as the MLflow tracking and model registry URI
+mlflow.set_tracking_uri(DATABASE_URL)
+mlflow.set_registry_uri(DATABASE_URL)
+
+# Configure MinIO for artifact storage
+MINIO_URL = os.getenv("MINIO_URL", "http://localhost:9000")
+MINIO_ACCESS_KEY = os.getenv("MINIO_ACCESS_KEY", "minio")
+MINIO_SECRET_KEY = os.getenv("MINIO_SECRET_KEY", "minio123")
+MLFLOW_ARTIFACT_URI = f"s3://{MINIO_ACCESS_KEY}:{MINIO_SECRET_KEY}@{MINIO_URL}/mlflow"
+
+# Set artifact URI separately for artifact storage
+mlflow.set_tracking_uri(DATABASE_URL)
+os.environ["MLFLOW_S3_ENDPOINT_URL"] = MINIO_URL
+mlflow.set_tracking_uri(DATABASE_URL)
+
+# PostgreSQL setup for SQLAlchemy
 engine = create_engine(DATABASE_URL)
 Base = declarative_base()
 SessionLocal = sessionmaker(bind=engine)
 
-# S3 (MinIO) setup
+# S3 (MinIO) setup for artifact storage
 s3_client = boto3.client(
     's3',
-    endpoint_url='http://localhost:9000',
-    # aws_access_key_id=os.getenv("AWS_ACCESS_KEY_ID"),
-    # aws_secret_access_key=os.getenv("AWS_SECRET_ACCESS_KEY")
-    aws_access_key_id='minio',
-    aws_secret_access_key='minio123'
-
+    endpoint_url=MINIO_URL,
+    aws_access_key_id=MINIO_ACCESS_KEY,
+    aws_secret_access_key=MINIO_SECRET_KEY
 )
 input_bucket = 'docs-input'
 output_bucket = 'docs-output'
@@ -131,13 +149,6 @@ class RetrievalQuery(BaseModel):
     query: str
     top_k: int = 5  # Number of results to return
 
-from transformers import AutoConfig, AutoTokenizer
-from huggingface_hub import HfApi, ModelInfo
-import os
-import mlflow
-from mlflow.tracking import MlflowClient
-from loguru import logger
-
 def log_dynamic_model_details():
     """
     Logs model details including real Description, Tags, and Versions into MLflow and records them in the MLflow model registry.
@@ -148,10 +159,10 @@ def log_dynamic_model_details():
 
     # Define model identifiers instead of file paths
     static_models = {
-        "Ollama Embedding Model": "sentence-transformers/all-MiniLM-L6-v2",
-        "GLiNER Extractor Model": "E3-JSI/gliner-multi-pii-domains-v1",
-        "Gliner Transformer Model": "knowledgator/gliner-multitask-large-v0.5",
-        "Tokenizer Model": "microsoft/deberta-v3-large"
+        "Ollama Embedding Model": ("sentence-transformers/all-MiniLM-L6-v2", os.path.join(huggingface_cache, "models--sentence-transformers--all-MiniLM-L6-v2")), 
+        "GLiNER Extractor Model": ("E3-JSI/gliner-multi-pii-domains-v1", os.path.join(huggingface_cache, "models--E3-JSI--gliner-multi-pii-domains-v1")),
+        "Gliner Transformer Model": ("knowledgator/gliner-multitask-large-v0.5", os.path.join(huggingface_cache, "models--knowledgator--gliner-multitask-large-v0.5")),
+        "Tokenizer Model": ("microsoft/deberta-v3-large", os.path.join(huggingface_cache, "models--microsoft--deberta-v3-large"))
     }
 
     # Cache paths for local models
@@ -167,12 +178,12 @@ def log_dynamic_model_details():
         run_id = run.info.run_id  # Capture the run ID
 
         # Log identifiers and metadata for Hugging Face models
-        for model_name, model_id in static_models.items():
+        for model_name, (model_id, model_file_path) in static_models.items():
             try:
                 # Check if the model is already registered
-                registered_models = [rm.name for rm in client.list_registered_models()]
+                registered_models = [rm.name for rm in client.search_registered_models()]
                 if model_name not in registered_models:
-                    registered_model = client.create_registered_model(model_name)
+                    client.create_registered_model(model_name)
                     logger.info(f"Modèle {model_name} enregistré dans le registre de modèles")
                 else:
                     logger.info(f"Modèle {model_name} déjà enregistré, passage à l'étape suivante")
@@ -189,10 +200,15 @@ def log_dynamic_model_details():
                     mlflow.set_tag(f"{model_name}_tag_{tag}", True)
                 mlflow.log_param(f"{model_name}_version", model_version)
 
-                # Register the model version
+                # Log the artifact in the current run's artifact directory
+                if os.path.exists(model_file_path):
+                    artifact_path = f"artifacts/{model_name}"
+                    mlflow.log_artifact(model_file_path, artifact_path=artifact_path)
+                    
+                # Register the model version with a valid source path and run_id
                 client.create_model_version(
                     name=model_name,
-                    source=f"mlruns/{run_id}/artifacts/{model_name}",
+                    source=f"{mlflow.get_artifact_uri()}/{artifact_path}",
                     run_id=run_id,
                 )
                 mlflow.log_param(f"{model_name}_identifier", model_id)
