@@ -1,5 +1,9 @@
 uploads/
 dataset/
+output/
+logs/
+emissions.csv
+
 models/
 __pycache__/
 *.pyc
@@ -8,4 +12,5 @@ mlruns/
 .env
 venv
 env/
-gli_config.yml
+node_modules/
+dist/

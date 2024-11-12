@@ -3,7 +3,7 @@ from typing import Optional, List, Sequence
 from langchain_ollama.embeddings import OllamaEmbeddings
 from langchain_ollama.chat_models import ChatOllama
 from langchain_community.vectorstores import Neo4jVector
-
+from langchain.chains import GraphCypherQAChain
 from langchain_core.output_parsers import StrOutputParser
 from langchain_core.runnables import RunnablePassthrough
 from langchain_community.graphs import Neo4jGraph
@@ -112,7 +112,7 @@ def clear_neo4j_database():
 
 @app.post("/index/", summary="Index documents", description="Index documents from a specified folder.")
 @REQUEST_LATENCY.time()
-def index_pdfs(folder_path: Optional[str] = Form(...)):
+def index_pdfs(folder_path: Optional[str] = Form("/home/pi/Documents/IF-SRV/4pdfs_subset/")):
     """
     Index PDF documents located at the specified folder path.
     """
