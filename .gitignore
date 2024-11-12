@@ -13,4 +13,5 @@ mlruns/
 venv
 env/
 node_modules/
-dist/
+dist/.env
+.env

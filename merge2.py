@@ -125,6 +125,28 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
+class RetrievalQuery(BaseModel):
+    query: str
+    top_k: int = 5  # Number of results to return
+
+# Retrieval route
+@app.post("/retrieve_documents/")
+async def retrieve_documents(request: RetrievalQuery):
+    # Create embeddings instance and vectorstore instance
+    ollama_emb = OllamaEmbeddings(model="llama3.2")
+    connection_string = "postgresql+psycopg://postgre_user:postgre_password@localhost/postgre_db"
+    vectorstore = PGVector(
+        embeddings=ollama_emb,
+        collection_name="document_embeddings",
+        connection=connection_string,
+        use_jsonb=True
+    )
+    
+    # Perform the similarity search
+    results = vectorstore.similarity_search(request.query, k=request.top_k)
+    
+    # Format and return results
+    return {"results": [{"content": doc.page_content, "metadata": doc.metadata} for doc in results]}
 
 # Device and Model Manager
 class DeviceManager:
