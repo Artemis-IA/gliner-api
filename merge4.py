@@ -144,125 +144,83 @@ graph_transformer = GlinerGraphTransformer(
 )
 
 
+OUTPUT_DIR = Path("output")
+OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
+
+class ExportFormat(str, Enum):
+    json = "json"
+    yaml = "yaml"
+    md = "md"
+
+class CustomPdfPipelineOptions(PdfPipelineOptions):
+    do_picture_classifier: bool = False 
+
 class RetrievalQuery(BaseModel):
     query: str
     top_k: int = 5  # Number of results to return
 
-def log_dynamic_model_details():
-    """
-    Logs model details, including descriptions, tags, and versions into MLflow, and records them in the MLflow model registry.
-    """
-    huggingface_cache = os.path.expanduser("~/.cache/huggingface/hub/")
-    client = MlflowClient()
-    hf_api = HfApi()  # Initialize the Hugging Face API client
-    
-    # Log MLflow tracking URI and artifact root for verification
-    logger.debug(f"MLflow Tracking URI: {mlflow.get_tracking_uri()}")
-    logger.debug(f"MLflow Artifact URI: {mlflow.get_artifact_uri()}")
+class ModelLoggerService:
+    def __init__(self, db_url: str):
+        mlflow.set_tracking_uri(db_url)
+        self.client = MlflowClient()
+        self.hf_api = HfApi()  # Initialize the Hugging Face API client
+        self.huggingface_cache = os.path.expanduser("~/.cache/huggingface/hub/")
+        self.static_models = {
+            "Ollama Embedding Model": ("sentence-transformers/all-MiniLM-L6-v2", os.path.join(self.huggingface_cache, "models--sentence-transformers--all-MiniLM-L6-v2")),
+            "GLiNER Extractor Model": ("E3-JSI/gliner-multi-pii-domains-v1", os.path.join(self.huggingface_cache, "models--E3-JSI--gliner-multi-pii-domains-v1")),
+            "Gliner Transformer Model": ("knowledgator/gliner-multitask-large-v0.5", os.path.join(self.huggingface_cache, "models--knowledgator--gliner-multitask-large-v0.5")),
+            "Tokenizer Model": ("microsoft/deberta-v3-large", os.path.join(self.huggingface_cache, "models--microsoft--deberta-v3-large"))
+        }
 
-    # Terminer toute exécution MLflow en cours pour éviter les conflits
-    mlflow.end_run()
-
-    # Define model identifiers instead of file paths
-    static_models = {
-        "Ollama Embedding Model": ("sentence-transformers/all-MiniLM-L6-v2", os.path.join(huggingface_cache, "models--sentence-transformers--all-MiniLM-L6-v2")),
-        "GLiNER Extractor Model": ("E3-JSI/gliner-multi-pii-domains-v1", os.path.join(huggingface_cache, "models--E3-JSI--gliner-multi-pii-domains-v1")),
-        "Gliner Transformer Model": ("knowledgator/gliner-multitask-large-v0.5", os.path.join(huggingface_cache, "models--knowledgator--gliner-multitask-large-v0.5")),
-        "Tokenizer Model": ("microsoft/deberta-v3-large", os.path.join(huggingface_cache, "models--microsoft--deberta-v3-large"))
-    }
-
-    # Start the MLflow run
-    try:
-        with mlflow.start_run(run_name="Suivi Automatique des Modèles") as run:
-            run_id = run.info.run_id  # Capture the run ID
-
-            # Log identifiers and metadata for Hugging Face models
-            for model_name, (model_id, model_file_path) in static_models.items():
-                logger.info(f"Processing model: {model_name}")
-                try:
-                    # Check if the model is already registered
-                    registered_models = [rm.name for rm in client.search_registered_models()]
-                    if model_name not in registered_models:
-                        client.create_registered_model(model_name)
-                        logger.info(f"Registered new model: {model_name}")
-                    else:
-                        logger.info(f"Model {model_name} is already registered")
-
-                    # Fetch model metadata from Hugging Face API
-                    model_info = hf_api.model_info(model_id)
-                    model_description = model_info.cardData.get('model_index', [{}])[0].get('description', 'No description available.')
-                    model_tags = model_info.tags
-                    model_version = model_info.sha
-
-                    # Log Description, Tags, and Version
-                    mlflow.set_tag(f"{model_name}_description", model_description)
-                    for tag in model_tags:
-                        mlflow.set_tag(f"{model_name}_tag_{tag}", True)
-                    mlflow.log_param(f"{model_name}_version", model_version)
-
-                    # Log the artifact in the current run's artifact directory
-                    if os.path.exists(model_file_path):
-                        artifact_path = f"artifacts/{model_name}"
-                        logger.debug(f"Uploading {model_name} to MLflow artifact path: {artifact_path}")
-                        mlflow.log_artifact(model_file_path, artifact_path=artifact_path)
-                        
-                        # Register the model version with a valid source path and run_id
-                        logger.info(f"Registering model version for: {model_name}")
-                        client.create_model_version(
-                            name=model_name,
-                            source=f"{mlflow.get_artifact_uri()}/{artifact_path}",
-                            run_id=run_id,
-                        )
-                        mlflow.log_param(f"{model_name}_identifier", model_id)
-                    else:
-                        logger.warning(f"Model path not found: {model_file_path}")
-
-                except Exception as e:
-                    logger.error(f"Error registering model {model_name}: {e}")
-
-            # Log cache paths for local file-based models
-            models_cache_paths = {
-                "DeBERTa Model": os.path.join(huggingface_cache, "models--microsoft--deberta-v3-large"),
-                "GLiNER Multi-PII Model": os.path.join(huggingface_cache, "models--E3-JSI--gliner-multi-pii-domains-v1"),
-                "Gliner Multitask Large Model": os.path.join(huggingface_cache, "models--knowledgator--gliner-multitask-large-v0.5"),
-                "GLiREL Large Model": os.path.join(huggingface_cache, "models--jackboyla--glirel-large-v0")
-            }
-
-            for model_name, path in models_cache_paths.items():
-                if os.path.exists(path):
-                    mlflow.log_param(f"{model_name}_cache_path", path)
-                    logger.info(f"Cache path for {model_name}: {path}")
-                else:
-                    mlflow.log_param(f"{model_name}_cache_path", "Not found")
-                    logger.warning(f"Cache path not found for {model_name}")
-    finally:
-        # Always ensure the MLflow run is ended to prevent conflicts
+    def log_model_details(self):
+        logger.info("Starting model logging process...")
         mlflow.end_run()
 
-    logger.info("Model logging process completed.")
+        try:
+            with mlflow.start_run(run_name="Model Logging") as run:
+                run_id = run.info.run_id
 
-# Call the updated function
-log_dynamic_model_details()
+                for model_name, (model_id, model_file_path) in self.static_models.items():
+                    logger.info(f"Processing model: {model_name}")
+                    self._log_model_metadata(model_name, model_id, model_file_path, run_id)
 
+            logger.info("Model logging process completed.")
+            return {"message": "Model logging completed successfully"}
+        except Exception as e:
+            logger.error(f"Error in logging model details: {e}")
+            return {"error": str(e)}
 
-# Retrieval route
-@app.post("/retrieve_documents/")
-async def retrieve_documents(request: RetrievalQuery):
-    # Create embeddings instance and vectorstore instance
-    ollama_emb = OllamaEmbeddings(model="llama3.2")
-    connection_string = "postgresql+psycopg://postgre_user:postgre_password@localhost/postgre_db"
-    vectorstore = PGVector(
-        embeddings=ollama_emb,
-        collection_name="document_embeddings",
-        connection=connection_string,
-        use_jsonb=True
-    )
-    
-    # Perform the similarity search
-    results = vectorstore.similarity_search(request.query, k=request.top_k)
-    
-    # Format and return results
-    return {"results": [{"content": doc.page_content, "metadata": doc.metadata} for doc in results]}
+    def _log_model_metadata(self, model_name, model_id, model_file_path, run_id):
+        try:
+            registered_models = [rm.name for rm in self.client.search_registered_models()]
+            if model_name not in registered_models:
+                self.client.create_registered_model(model_name)
+
+            model_info = self.hf_api.model_info(model_id)
+            model_description = model_info.cardData.get('model_index', [{}])[0].get('description', 'No description available.')
+            model_tags = model_info.tags
+            model_version = model_info.sha
+
+            mlflow.set_tag(f"{model_name}_description", model_description)
+            for tag in model_tags:
+                mlflow.set_tag(f"{model_name}_tag_{tag}", True)
+            mlflow.log_param(f"{model_name}_version", model_version)
+
+            if os.path.exists(model_file_path):
+                artifact_path = f"artifacts/{model_name}"
+                mlflow.log_artifact(model_file_path, artifact_path=artifact_path)
+                self.client.create_model_version(
+                    name=model_name,
+                    source=f"{mlflow.get_artifact_uri()}/{artifact_path}",
+                    run_id=run_id
+                )
+            else:
+                logger.warning(f"Model path not found: {model_file_path}")
+        except Exception as e:
+            logger.error(f"Error logging metadata for model {model_name}: {e}")
+
+model_logger_service = ModelLoggerService(db_url=DATABASE_URL)
+
 
 # Device and Model Manager
 class DeviceManager:
@@ -288,47 +246,49 @@ class DeviceManager:
 from codecarbon import EmissionsTracker
 import mlflow
 
-
 class ModelManager:
     def __init__(self):
         self.device_manager = DeviceManager()
         self.tracker_active = False
-        self.emissions_tracker = None  # Initialiser le tracker en tant que None
+        self.emissions_tracker = None  # Initialize the tracker as None
 
     async def process_document(self, doc_converter, doc_path, model_name: str):
-        # Démarre une exécution MLflow
+        # Ensure any previous MLflow run is ended before starting a new one
+        if mlflow.active_run():
+            mlflow.end_run()
+
         with mlflow.start_run(run_name=f"Processing {model_name}"):
-            # Initialisation de CodeCarbon si aucune instance n'est active
+            # Initialize CodeCarbon tracker if none is active
             if not self.tracker_active:
                 try:
                     self.emissions_tracker = EmissionsTracker(project_name="doc_processing")
                     self.emissions_tracker.start()
                     self.tracker_active = True
                 except Exception as e:
-                    logger.warning(f"Impossible de démarrer CodeCarbon : {e}")
+                    logger.warning(f"Unable to start CodeCarbon: {e}")
                     self.emissions_tracker = None
 
             start_time = time.time()
             result = list(doc_converter.convert_all([doc_path]))[0]
             inference_time = time.time() - start_time
 
-            # Si CodeCarbon est actif, récupérer les émissions
+            # Capture emissions if CodeCarbon tracker is active
             emissions = None
             if self.emissions_tracker and self.tracker_active:
                 try:
                     emissions = self.emissions_tracker.stop()
                     CARBON_EMISSIONS.set(emissions)
                 except Exception as e:
-                    logger.warning(f"Erreur lors de l'arrêt de CodeCarbon : {e}")
+                    logger.warning(f"Error stopping CodeCarbon tracker: {e}")
                 finally:
-                    self.tracker_active = False  # Réinitialise pour la prochaine utilisation
+                    self.tracker_active = False  # Reset for next use
 
-            # Enregistrer les métriques dans MLflow
+            # Log metrics in MLflow
             mlflow.log_metric("inference_time", inference_time)
             if emissions is not None:
                 mlflow.log_metric("carbon_emissions", emissions)
 
-            # Journalisation des ressources matérielles
+            # Log hardware resource usage
             self.device_manager.log_device_stats()
             if self.device_manager.using_gpu:
                 gpu_memory_usage = GPUtil.getGPUs()[0].memoryUsed
@@ -350,108 +310,123 @@ class DocumentLog(Base):
 
 Base.metadata.create_all(bind=engine)
 
-def upload_to_s3(file_name, bucket):
-    s3_url = None
-    try:
-        s3_client.upload_file(file_name, bucket, os.path.basename(file_name))
-        s3_url = f"s3://{bucket}/{os.path.basename(file_name)}"
-    except:
-        logger.error(f"Failed to upload {file_name}")
-    return s3_url
 
-def log_to_postgres(file_name, s3_url):
-    with SessionLocal() as session:
+class DocumentLogService:
+    def __init__(self, session_factory):
+        self.session_factory = session_factory
+
+    def log_document(self, file_name: str, s3_url: str):
         log = DocumentLog(file_name=file_name, s3_url=s3_url)
-        session.add(log)
-        session.commit()
+        with self.session_factory() as session:
+            session.add(log)
+            session.commit()
 
-OUTPUT_DIR = Path("output")
-OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
+class S3Service:
+    def __init__(self, client, input_bucket, output_bucket, layouts_bucket):
+        self.client = client
+        self.input_bucket = input_bucket
+        self.output_bucket = output_bucket
+        self.layouts_bucket = layouts_bucket
 
-class ExportFormat(str, Enum):
-    json = "json"
-    yaml = "yaml"
-    md = "md"
+    def upload_file(self, file_path: Path, bucket_name: str) -> Optional[str]:
+        try:
+            self.client.upload_file(str(file_path), bucket_name, file_path.name)
+            return f"s3://{bucket_name}/{file_path.name}"
+        except Exception as e:
+            logger.error(f"Failed to upload file {file_path.name}: {e}")
+            return None
 
-class CustomPdfPipelineOptions(PdfPipelineOptions):
-    do_picture_classifier: bool = False 
+
+class MLFlowService:
+    def __init__(self, db_url):
+        mlflow.set_tracking_uri(db_url)
+        self.client = MlflowClient()
+
+    def log_params(self, params: Dict[str, Any]):
+        for param, value in params.items():
+            mlflow.log_param(param, value)
+
+    def log_metrics(self, metrics: Dict[str, Any]):
+        for metric, value in metrics.items():
+            mlflow.log_metric(metric, value)
 
 
-def create_document_converter(use_ocr, export_figures, export_tables, enrich_figures):
-    pipeline_options = CustomPdfPipelineOptions()
-    pipeline_options.do_ocr = use_ocr
-    pipeline_options.generate_page_images = True
-    pipeline_options.generate_table_images = export_tables
-    pipeline_options.generate_picture_images = export_figures
-    if enrich_figures:
-        pipeline_options.do_picture_classifier = enrich_figures
-    return DocumentConverter(
-        allowed_formats=[InputFormat.PDF, InputFormat.DOCX],
-        format_options={
-            InputFormat.PDF: PdfFormatOption(pipeline_options=pipeline_options, backend=PyPdfiumDocumentBackend)
-        }
-    )
+class DocumentProcessor:
+    def __init__(self, s3_service: S3Service, mlflow_service: MLFlowService, session_factory):
+        self.s3_service = s3_service
+        self.mlflow_service = mlflow_service
+        self.doc_log_service = DocumentLogService(session_factory)
 
-def export_documents(conv_results: List[ConversionResult], output_dir: Path, export_formats: List[ExportFormat], export_figures: bool, export_tables: bool) -> Tuple[int, int, int]:
-    success_count = 0
-    partial_success_count = 0
-    failure_count = 0
+    def create_converter(self, use_ocr: bool, export_figures: bool, export_tables: bool, enrich_figures: bool):
+        options = CustomPdfPipelineOptions()
+        options.do_ocr = use_ocr
+        options.generate_page_images = True
+        options.generate_table_images = export_tables
+        options.generate_picture_images = export_figures
+        options.do_picture_classifier = enrich_figures
+        return DocumentConverter(
+            allowed_formats=[InputFormat.PDF, InputFormat.DOCX],
+            format_options={InputFormat.PDF: PdfFormatOption(pipeline_options=options, backend=PyPdfiumDocumentBackend)}
+        )
 
-    for conv_res in conv_results:
-        doc_filename = conv_res.input.file.stem
+    def export_document(self, result, output_dir: Path, export_formats: List[ExportFormat], export_figures: bool, export_tables: bool):
+        success_count, partial_success_count, failure_count = 0, 0, 0
+        doc_filename = result.input.file.stem
 
-        if conv_res.status == ConversionStatus.SUCCESS:
+        if result.status == ConversionStatus.SUCCESS:
             success_count += 1
-
-            # Export des résultats dans les formats sélectionnés
-            if ExportFormat.json in export_formats:
-                json_path = output_dir / f"{doc_filename}.json"
-                with json_path.open("w", encoding='utf-8') as json_file:
-                    json.dump(conv_res.document.export_to_dict(), json_file, ensure_ascii=False, indent=2)
-                upload_to_s3(json_path, output_bucket)
-
-            if ExportFormat.yaml in export_formats:
-                yaml_path = output_dir / f"{doc_filename}.yaml"
-                with yaml_path.open("w", encoding='utf-8') as yaml_file:
-                    yaml.dump(conv_res.document.export_to_dict(), yaml_file, allow_unicode=True, default_flow_style=False)
-                upload_to_s3(yaml_path, output_bucket)
-
-            if ExportFormat.md in export_formats:
-                md_path = output_dir / f"{doc_filename}.md"
-                with md_path.open("w", encoding='utf-8') as md_file:
-                    md_file.write(conv_res.document.export_to_markdown())
-                upload_to_s3(md_path, output_bucket)
-
-            # Export des figures (images)
-            if export_figures:
-                figures_dir = output_dir / "figures"
-                figures_dir.mkdir(exist_ok=True)
-                for idx, element in enumerate(conv_res.document.iterate_items()):
-                    if isinstance(element, PictureItem):
-                        figure_path = figures_dir / f"{doc_filename}_figure_{idx + 1}.png"
-                        element.image.pil_image.save(figure_path, format="PNG")
-                        upload_to_s3(figure_path, layouts_bucket)
-
-            # Export des tableaux
-            if export_tables:
-                tables_dir = output_dir / "tables"
-                tables_dir.mkdir(exist_ok=True)
-                for table_idx, table in enumerate(conv_res.document.tables):
-                    csv_path = tables_dir / f"{doc_filename}_table_{table_idx + 1}.csv"
-                    table.export_to_dataframe().to_csv(csv_path, index=False, encoding='utf-8')
-                    upload_to_s3(csv_path, layouts_bucket)
-
-                    html_path = tables_dir / f"{doc_filename}_table_{table_idx + 1}.html"
-                    with html_path.open("w", encoding='utf-8') as html_file:
-                        html_file.write(table.export_to_html())
-                    upload_to_s3(html_path, layouts_bucket)
-
-        elif conv_res.status == ConversionStatus.PARTIAL_SUCCESS:
+            self._export_file(result, output_dir, export_formats, export_figures, export_tables, doc_filename)
+        elif result.status == ConversionStatus.PARTIAL_SUCCESS:
             partial_success_count += 1
         else:
             failure_count += 1
 
-    return success_count, partial_success_count, failure_count
+        return success_count, partial_success_count, failure_count
+
+    def _export_file(self, result, output_dir: Path, export_formats: List[ExportFormat], export_figures: bool, export_tables: bool, doc_filename: str):
+        if ExportFormat.json in export_formats:
+            self._save_and_upload(result, output_dir, doc_filename, "json", export_format="json")
+        if ExportFormat.yaml in export_formats:
+            self._save_and_upload(result, output_dir, doc_filename, "yaml", export_format="yaml")
+        if ExportFormat.md in export_formats:
+            self._save_and_upload(result, output_dir, doc_filename, "md", export_format="md")
+
+        if export_figures:
+            self._export_images(result, output_dir / "figures", doc_filename, self.s3_service.layouts_bucket)
+        if export_tables:
+            self._export_tables(result, output_dir / "tables", doc_filename, self.s3_service.layouts_bucket)
+
+    def _save_and_upload(self, result, output_dir, doc_filename, ext, export_format="json"):
+        file_path = output_dir / f"{doc_filename}.{ext}"
+        with file_path.open("w", encoding="utf-8") as file:
+            if export_format == "json":
+                json.dump(result.document.export_to_dict(), file, ensure_ascii=False, indent=2)
+            elif export_format == "yaml":
+                yaml.dump(result.document.export_to_dict(), file, allow_unicode=True)
+            elif export_format == "md":
+                file.write(result.document.export_to_markdown())
+        self.s3_service.upload_file(file_path, self.s3_service.output_bucket)
+
+    def _export_images(self, result, figures_dir, doc_filename, bucket):
+        figures_dir.mkdir(exist_ok=True)
+        for idx, element in enumerate(result.document.iterate_items()):
+            if isinstance(element, PictureItem):
+                image_path = figures_dir / f"{doc_filename}_figure_{idx + 1}.png"
+                element.image.pil_image.save(image_path, format="PNG")
+                self.s3_service.upload_file(image_path, bucket)
+
+    def _export_tables(self, result, tables_dir, doc_filename, bucket):
+        tables_dir.mkdir(exist_ok=True)
+        for idx, table in enumerate(result.document.tables):
+            csv_path = tables_dir / f"{doc_filename}_table_{idx + 1}.csv"
+            table.export_to_dataframe().to_csv(csv_path, index=False, encoding="utf-8")
+            self.s3_service.upload_file(csv_path, bucket)
+
+            html_path = tables_dir / f"{doc_filename}_table_{idx + 1}.html"
+            with html_path.open("w", encoding="utf-8") as html_file:
+                html_file.write(table.export_to_html())
+            self.s3_service.upload_file(html_path, bucket)
+
 
 EMBED_MODEL_ID = "sentence-transformers/all-MiniLM-L6-v2"
 TOKENIZER = AutoTokenizer.from_pretrained(EMBED_MODEL_ID)
@@ -650,7 +625,15 @@ class MaxTokenLimitingChunkerWithMerging(BaseChunker):
             dl_doc, preliminary_chunks, tokenizer, splitter, self.max_tokens
         )
         return iter(output_chunks)
-    
+
+s3_service = S3Service(
+    client=s3_client,
+    input_bucket=input_bucket,
+    output_bucket=output_bucket,
+    layouts_bucket=layouts_bucket
+)    
+mlflow_service = MLFlowService(db_url=DATABASE_URL)
+
 @app.post("/upload/")
 async def upload_files(
     files: List[UploadFile] = File(...),
@@ -663,63 +646,33 @@ async def upload_files(
     REQUEST_COUNT.inc()
     logger.info(f"Received {len(files)} files for upload")
 
-    doc_converter = create_document_converter(use_ocr, export_figures, export_tables, enrich_figures)
-    input_file_paths = []
-    
-    # Step 1: Upload original files to input bucket
+    doc_processor = DocumentProcessor(s3_service, mlflow_service, SessionLocal)
+    converter = doc_processor.create_converter(use_ocr, export_figures, export_tables, enrich_figures)
+    success_count, partial_success_count, failure_count = 0, 0, 0
+
     for file in files:
         temp_file = OUTPUT_DIR / file.filename
         async with aiofiles.open(temp_file, 'wb') as out_file:
             content = await file.read()
             await out_file.write(content)
-        input_file_paths.append(temp_file)
-        input_s3_url = upload_to_s3(temp_file, input_bucket)
-        logger.info(f"Uploaded original file '{temp_file.name}' to input bucket: {input_s3_url}")
+        input_s3_url = s3_service.upload_file(temp_file, s3_service.input_bucket)
+        doc_processor.doc_log_service.log_document(file.filename, input_s3_url)
 
-    # Step 2: Process files and save the converted files to output bucket
-    results = []
-    for doc_path in input_file_paths:
-        logger.info(f"Converting document: {doc_path}")
         with mlflow.start_run(run_name="Document Conversion"):
-            mlflow.log_param("file_name", doc_path.name)
-            mlflow.log_param("conversion_type", "DocConversion")
-            mlflow.log_param("use_ocr", use_ocr)
-            # mlflow.log_param("export_figures", export_figures)
-            # mlflow.log_param("export_tables", export_tables)
-            # mlflow.log_param("enrich_figures", enrich_figures)
-            # mlflow.log_param("export_formats", export_formats)
-            # mlflow.log_param("input_bucket", input_bucket)
-            # mlflow.log_param("output_bucket", output_bucket)
-            # mlflow.log_param("layouts_bucket", layouts_bucket)
-            # mlflow.log_param("embedding_model_id", EMBED_MODEL_ID)
-            # mlflow.log_param("max_tokens", 512)
-            # mlflow.log_param("model_manager", model_manager)
-            # mlflow.log_param("vectorstore", vectorstore)
-            # mlflow.log_param("text_splitter", text_splitter)
-            # mlflow.log_param("graph_transformer", graph_transformer)
-            # mlflow.log_param("gliner_extractor", gliner_extractor)
+            result = await model_manager.process_document(converter, temp_file, model_name="Docling")
+            if result:
+                counts = doc_processor.export_document(result, OUTPUT_DIR, export_formats, export_figures, export_tables)
+                success_count += counts[0]
+                partial_success_count += counts[1]
+                failure_count += counts[2]
 
-        result = await model_manager.process_document(doc_converter, doc_path, model_name="Docling")
-        
-        if result and result.status == ConversionStatus.SUCCESS:
-            results.append(result)
-            export_results = export_documents([result], OUTPUT_DIR, export_formats, export_figures, export_tables)
-
-            # Chunk the document, generate embeddings, and store in PGVector
-            with mlflow.start_run(run_name="Embedding Generation"):
-                chunker = MaxTokenLimitingChunkerWithMerging(max_tokens=512, embedding_model_id=EMBED_MODEL_ID)
-                chunks = list(chunker.chunk(dl_doc=result.document))
-
-                mlflow.log_metric("chunk_count", len(chunks))
-                documents = [Document(page_content=chunk.text, metadata={"file_name": doc_path.name}) for chunk in chunks]
-                vectorstore.add_documents(documents=documents)
-
-                mlflow.log_param("embedding_model", "OllamaEmbeddings")
-                mlflow.log_metric("embedding_chunk_count", len(documents))
-
-        mlflow.end_run()
-
-    return {"message": "Documents processed and stored successfully", "uploaded_to": output_bucket}
+    return {
+        "message": "Documents processed and stored successfully",
+        "uploaded_to": s3_service.output_bucket,
+        "success_count": success_count,
+        "partial_success_count": partial_success_count,
+        "failure_count": failure_count
+    }
 
 
 @app.post("/upload_path/")
@@ -740,25 +693,29 @@ async def upload_path(
         if file.suffix.lower() in ['.pdf', '.docx']
     ]
 
-    doc_converter = create_document_converter(use_ocr, export_figures, export_tables, enrich_figures)
-    results = []
-    
+    doc_processor = DocumentProcessor(s3_service, mlflow_service, SessionLocal)
+    converter = doc_processor.create_converter(use_ocr, export_figures, export_tables, enrich_figures)
+    success_count, partial_success_count, failure_count = 0, 0, 0
+
     for doc_path in input_file_paths:
-        input_s3_url = upload_to_s3(doc_path, input_bucket)
-        result = await model_manager.process_document(doc_converter, doc_path)
-        
-        if result and result.status == ConversionStatus.SUCCESS:
-            results.append(result)
-            export_results = export_documents([result], OUTPUT_DIR, export_formats, export_figures, export_tables)
+        input_s3_url = s3_service.upload_file(doc_path, s3_service.input_bucket)
+        doc_processor.doc_log_service.log_document(doc_path.name, input_s3_url)
 
-            # Chunk the document, generate embeddings, and store in PGVector
-            chunker = MaxTokenLimitingChunkerWithMerging(max_tokens=512, embedding_model_id=EMBED_MODEL_ID)
-            chunks = list(chunker.chunk(dl_doc=result.document))
+        with mlflow.start_run(run_name="Document Conversion"):
+            result = await model_manager.process_document(converter, doc_path, model_name="Docling")
+            if result:
+                counts = doc_processor.export_document(result, OUTPUT_DIR, export_formats, export_figures, export_tables)
+                success_count += counts[0]
+                partial_success_count += counts[1]
+                failure_count += counts[2]
 
-            documents = [Document(page_content=chunk.text, metadata={"file_name": doc_path.name}) for chunk in chunks]
-            vectorstore.add_documents(documents=documents)
-
-    return {"message": "Directory processed and stored successfully", "uploaded_to": output_bucket}
+    return {
+        "message": "Directory processed and stored successfully",
+        "uploaded_to": s3_service.output_bucket,
+        "success_count": success_count,
+        "partial_success_count": partial_success_count,
+        "failure_count": failure_count
+    }
 
 @app.post("/index_documents/")
 def index_documents(folder_path: str):
@@ -780,6 +737,26 @@ def index_documents(folder_path: str):
     logger.info(f"All documents indexed successfully from folder: {folder_path}")
     return {"message": "Documents indexed in Neo4j"}
 
+
+@app.post("/retrieve_documents/")
+async def retrieve_documents(request: RetrievalQuery):
+    # Create embeddings instance and vectorstore instance
+    ollama_emb = OllamaEmbeddings(model="llama3.2")
+    connection_string = "postgresql+psycopg://postgre_user:postgre_password@localhost/postgre_db"
+    vectorstore = PGVector(
+        embeddings=ollama_emb,
+        collection_name="document_embeddings",
+        connection=connection_string,
+        use_jsonb=True
+    )
+    
+    # Perform the similarity search
+    results = vectorstore.similarity_search(request.query, k=request.top_k)
+    
+    # Format and return results
+    return {"results": [{"content": doc.page_content, "metadata": doc.metadata} for doc in results]}
+
+
 @app.post("/search/")
 def hybrid_search(query: str):
     store = Neo4jVector.from_existing_index(
@@ -794,6 +771,16 @@ def hybrid_search(query: str):
     retriever = store.as_retriever()
     results = retriever.invoke(query)
     return {"results": results}
+
+@app.post("/log_models/")
+def log_models():
+    """API endpoint to trigger logging of model details."""
+    return model_logger_service.log_model_details()
+
+@app.post("/log_queries/")
+def log_queries(query: str):
+    """API endpoint to trigger logging of queries."""
+    return model_logger_service.log_query(query)
 
 # Metrics endpoint for Prometheus
 @app.get("/metrics")
