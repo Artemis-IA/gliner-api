@@ -13,7 +13,7 @@ import asyncio
 import aiofiles
 
 # FastAPI et ses dépendances
-from fastapi import FastAPI, File, Query, UploadFile, HTTPException, Form, Response
+from fastapi import FastAPI, File, Request, Query, UploadFile, HTTPException, Form, Response
 from fastapi.responses import JSONResponse
 from fastapi.middleware.cors import CORSMiddleware
 from enum import Enum
@@ -55,6 +55,7 @@ from langchain_community.document_loaders import PyPDFDirectoryLoader
 
 # Surveillance des performances et des métriques
 from prometheus_client import Counter, Histogram, Gauge, start_http_server, generate_latest, CONTENT_TYPE_LATEST
+from prometheus_fastapi_instrumentator import Instrumentator
 
 # Autres dépendances
 from transformers import AutoTokenizer
@@ -80,8 +81,13 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# Prometheus Metrics
-start_http_server(8001)
+# Logger Setup
+logger.add("logs/conversion_{time}.log", rotation="1 day", retention="7 days", level="INFO")
+# Metrics
+Instrumentator().instrument(app).expose(app)
+# Custom metrics
+start_http_server(8002)
+
 REQUEST_COUNT = Counter("app_request_count", "Nombre total de requêtes")
 PROCESS_TIME = Histogram("app_process_time_seconds", "Temps de traitement des requêtes")
 GPU_MEMORY_USAGE = Gauge("gpu_memory_usage_bytes", "Utilisation mémoire GPU")
@@ -89,9 +95,7 @@ CPU_USAGE = Gauge("cpu_usage_percent", "Utilisation CPU")
 MEMORY_USAGE = Gauge("memory_usage_bytes", "Utilisation mémoire RAM")
 CARBON_EMISSIONS = Gauge("carbon_emissions_grams", "Émissions CO2 estimées")
 MODEL_LOG_COUNT = Counter("model_log_count", "Nombre de modèles enregistrés dans MLflow")
-
-# Logger Setup
-logger.add("logs/conversion_{time}.log", rotation="1 day", retention="7 days", level="INFO")
+emissions_tracker = EmissionsTracker(project_name="doc_processing", save_to_file=False, save_to_prometheus=True, prometheus_url="localhost:8002")
 
 # Neo4j setup
 URI = "bolt://localhost:7687"
@@ -146,6 +150,77 @@ for bucket in [input_bucket, output_bucket, layouts_bucket]:
         s3_client.create_bucket(Bucket=bucket)
         logger.info(f"Bucket '{bucket}' created.")
 
+def initialize_emissions_tracker():
+    """
+    Initialisation d'un tracker CodeCarbon avec nettoyage préalable du fichier de verrouillage.
+    """
+    global emissions_tracker
+    lock_file = "/tmp/.codecarbon.lock"
+    if os.path.exists(lock_file):
+        try:
+            os.remove(lock_file)
+            logger.info("Fichier de verrouillage CodeCarbon supprimé.")
+        except Exception as e:
+            logger.warning(f"Impossible de supprimer le fichier de verrouillage CodeCarbon : {e}")
+
+    emissions_tracker = EmissionsTracker(allow_multiple_runs=True)
+    logger.info("Tracker CodeCarbon initialisé.")
+
+# Middleware pour collecter les métriques personnalisées
+@app.middleware("http")
+async def custom_metrics_middleware(request: Request, call_next):
+    start_time = time.time()
+    REQUEST_COUNT.inc()  # Incrémentation du compteur de requêtes
+    response = await call_next(request)
+    latency = time.time() - start_time
+
+    PROCESS_TIME.observe(latency)
+    log_system_metrics()  # Log des métriques système
+
+    return response
+
+def log_system_metrics():
+    """
+    Log et exposition des métriques système (CPU, RAM, GPU et émissions de CO₂).
+    """
+    try:
+        CPU_USAGE.set(psutil.cpu_percent())
+        MEMORY_USAGE.set(psutil.virtual_memory().used)
+
+        # GPU metrics
+        gpus = GPUtil.getGPUs()
+        if gpus:
+            GPU_MEMORY_USAGE.set(gpus[0].memoryUsed)  # Seulement la première GPU
+
+        # CodeCarbon emissions
+        global emissions_tracker
+        if emissions_tracker:
+            emissions_tracker.start()
+            emissions = emissions_tracker.stop()
+            if emissions is not None:
+                CARBON_EMISSIONS.set(emissions)
+                logger.info(f"Émissions collectées : {emissions:.6f} kgCO₂eq")
+            else:
+                logger.warning("Aucune donnée d'émissions collectée (None).")
+    except Exception as e:
+        logger.warning(f"Erreur lors de la collecte des métriques : {e}")
+
+@app.on_event("startup")
+async def startup_event():
+    initialize_emissions_tracker()
+    log_system_metrics()
+    try:
+        logger.info("Starting application...")
+        ensure_vector_index(driver)
+        logger.info("Neo4j vector index setup completed successfully.")
+    except Exception as e:
+        logger.error(f"Error during application startup: {e}")
+        raise HTTPException(status_code=500, detail="Error during application startup.")
+
+@app.on_event("shutdown")
+async def on_shutdown():
+    logger.info("Application arrêtée.")
+
 # Initialisation du modèle d'embedding Ollama et PGVector
 ollama_emb = OllamaEmbeddings(model="llama3.2")
 connection_string = "postgresql+psycopg://postgre_user:postgre_password@localhost/postgre_db"
@@ -175,64 +250,6 @@ def ensure_vector_index(driver):
             print(f"Error ensuring index: {e}")
             raise e
 
-# Populate test vectors
-def populate_vectors(driver, vectors):
-    """
-    Populate Neo4j with sample vector data.
-    """
-    query = """
-    UNWIND $vectors AS vector
-    CREATE (n:Vector {vector: vector})
-    """
-    with driver.session() as session:
-        session.run(query, vectors=vectors)
-
-# Initialize the Neo4j vector index and optionally populate it
-@app.on_event("startup")
-async def startup_event():
-    """
-    Application startup tasks, including ensuring Neo4j vector index existence.
-    """
-    try:
-        logger.info("Starting application...")
-        ensure_vector_index(driver)
-        logger.info("Neo4j vector index setup completed successfully.")
-    except Exception as e:
-        logger.error(f"Error during application startup: {e}")
-        raise HTTPException(status_code=500, detail="Error during application startup.")
-
-@app.post("/populate_vectors/")
-async def populate_sample_vectors():
-    """
-    Populate the Neo4j database with sample vectors.
-    """
-    sample_vectors = [[0.1, 0.2, 0.3], [0.4, 0.5, 0.6]]
-    try:
-        populate_vectors(driver, sample_vectors)
-        return {"message": "Sample vectors added successfully."}
-    except Exception as e:
-        print(f"Error populating vectors: {e}")
-        raise HTTPException(status_code=500, detail="Error populating vectors.")
-
-@app.get("/test_neo4j_vector/")
-async def test_neo4j_vector():
-    """
-    Test the Neo4jVector initialization.
-    """
-    try:
-        store = Neo4jVector.from_existing_index(
-            embeddings=ollama_emb,
-            url=URI,
-            username=USER,
-            password=PASSWORD,
-            index_name="vector_index",
-            keyword_index_name="keyword",
-            search_type="hybrid",
-        )
-        return {"message": "Neo4jVector initialized successfully."}
-    except ValueError as e:
-        return {"error": f"Initialization error: {e}"}
-    
 # GLiNER extractor and transformer
 with open('conf/gli_config.yml', 'r') as file:
     config = yaml.safe_load(file)
@@ -377,10 +394,6 @@ class DeviceManager:
         CPU_USAGE.set(cpu_percent)
         MEMORY_USAGE.set(memory.rss)
         logger.info(f"CPU: {cpu_percent}% | Mémoire: {memory.rss / 1024 / 1024:.2f}MB")
-
-from codecarbon import EmissionsTracker
-import mlflow
-
 class ModelManager:
     def __init__(self):
         self.device_manager = DeviceManager()
