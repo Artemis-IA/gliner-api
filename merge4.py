@@ -1,17 +1,37 @@
-import os, time, json, yaml, sys, inspect
+import os
+import time
+import json
+import yaml
+import sys
+import inspect
 from pathlib import Path
 from typing import List, Tuple, Optional, Dict, Any, Iterator
+
+# Asynchronisme et exécution concurrente
+from concurrent.futures import ThreadPoolExecutor
+import asyncio
 import aiofiles
+
+# FastAPI et ses dépendances
 from fastapi import FastAPI, File, Query, UploadFile, HTTPException, Form, Response
 from fastapi.responses import JSONResponse
 from fastapi.middleware.cors import CORSMiddleware
 from enum import Enum
+
+# Bases de données et ORM
 from sqlalchemy import create_engine, Column, String, Integer
 from sqlalchemy.ext.declarative import declarative_base
 from sqlalchemy.orm import sessionmaker
+
+# Bibliothèques pour le traitement du langage naturel
 import torch
-from huggingface_hub import HfApi, ModelInfo
-import psutil, GPUtil
+from huggingface_hub import HfApi
+
+# Surveillance des ressources
+import psutil
+import GPUtil
+
+# Modules spécifiques aux fonctionnalités mentionnées
 from docling.document_converter import DocumentConverter, PdfFormatOption
 from docling.datamodel.base_models import InputFormat
 from docling.datamodel.document import ConversionResult, ConversionStatus
@@ -19,27 +39,36 @@ from docling.datamodel.pipeline_options import PdfPipelineOptions
 from docling.backend.pypdfium2_backend import PyPdfiumDocumentBackend
 from docling_core.types import DoclingDocument
 from docling_core.types.doc import PictureItem
+
 import semchunk
 from docling_core.transforms.chunker.hierarchical_chunker import DocChunk
 from docling_core.transforms.chunker import BaseChunk, BaseChunker, DocMeta, HierarchicalChunker
+
 from langchain_core.documents import Document
 from langchain_ollama.embeddings import OllamaEmbeddings
 from langchain_community.vectorstores import Neo4jVector
 from langchain_postgres import PGVector
-from langchain_text_splitters import RecursiveCharacterTextSplitter
+from langchain_text_splitters import CharacterTextSplitter
 from langchain_experimental.graph_transformers.gliner import GlinerGraphTransformer
 from langchain_community.graph_vectorstores.extractors import GLiNERLinkExtractor
 from langchain_community.document_loaders import PyPDFDirectoryLoader
-from prometheus_client import Counter, Histogram, Gauge, start_http_server
+
+# Surveillance des performances et des métriques
+from prometheus_client import Counter, Histogram, Gauge, start_http_server, generate_latest, CONTENT_TYPE_LATEST
+
+# Autres dépendances
 from transformers import AutoTokenizer
-import boto3, re
+import boto3
+import re
 from loguru import logger
 from codecarbon import EmissionsTracker
 from pydantic import BaseModel, PositiveInt
-from neo4j import GraphDatabase
+from neo4j import GraphDatabase, Transaction
+from py2neo import Graph, NodeMatcher, Relationship
 from dotenv import load_dotenv
 import mlflow
 from mlflow.tracking import MlflowClient
+from datetime import datetime
 
 load_dotenv()
 app = FastAPI(title="Document Processing API", version="1.0.0")
@@ -50,6 +79,7 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
 # Prometheus Metrics
 start_http_server(8001)
 REQUEST_COUNT = Counter("app_request_count", "Nombre total de requêtes")
@@ -125,8 +155,84 @@ vectorstore = PGVector(
     connection=connection_string,
     use_jsonb=True
 )
-text_splitter = RecursiveCharacterTextSplitter(chunk_size=1000)
+text_splitter = CharacterTextSplitter(chunk_size=1000)
 
+# Initialize Neo4jVector at app startup
+def ensure_vector_index(driver):
+    """
+    Ensure that the vector index exists in Neo4j.
+    """
+    query = """
+    CREATE INDEX vector_index IF NOT EXISTS
+    FOR (n:Vector)
+    ON (n.vector)
+    """
+    with driver.session() as session:
+        try:
+            session.run(query)
+            print("Index 'vector_index' ensured.")
+        except Exception as e:
+            print(f"Error ensuring index: {e}")
+            raise e
+
+# Populate test vectors
+def populate_vectors(driver, vectors):
+    """
+    Populate Neo4j with sample vector data.
+    """
+    query = """
+    UNWIND $vectors AS vector
+    CREATE (n:Vector {vector: vector})
+    """
+    with driver.session() as session:
+        session.run(query, vectors=vectors)
+
+# Initialize the Neo4j vector index and optionally populate it
+@app.on_event("startup")
+async def startup_event():
+    """
+    Application startup tasks, including ensuring Neo4j vector index existence.
+    """
+    try:
+        logger.info("Starting application...")
+        ensure_vector_index(driver)
+        logger.info("Neo4j vector index setup completed successfully.")
+    except Exception as e:
+        logger.error(f"Error during application startup: {e}")
+        raise HTTPException(status_code=500, detail="Error during application startup.")
+
+@app.post("/populate_vectors/")
+async def populate_sample_vectors():
+    """
+    Populate the Neo4j database with sample vectors.
+    """
+    sample_vectors = [[0.1, 0.2, 0.3], [0.4, 0.5, 0.6]]
+    try:
+        populate_vectors(driver, sample_vectors)
+        return {"message": "Sample vectors added successfully."}
+    except Exception as e:
+        print(f"Error populating vectors: {e}")
+        raise HTTPException(status_code=500, detail="Error populating vectors.")
+
+@app.get("/test_neo4j_vector/")
+async def test_neo4j_vector():
+    """
+    Test the Neo4jVector initialization.
+    """
+    try:
+        store = Neo4jVector.from_existing_index(
+            embeddings=ollama_emb,
+            url=URI,
+            username=USER,
+            password=PASSWORD,
+            index_name="vector_index",
+            keyword_index_name="keyword",
+            search_type="hybrid",
+        )
+        return {"message": "Neo4jVector initialized successfully."}
+    except ValueError as e:
+        return {"error": f"Initialization error: {e}"}
+    
 # GLiNER extractor and transformer
 with open('conf/gli_config.yml', 'r') as file:
     config = yaml.safe_load(file)
@@ -157,7 +263,9 @@ class CustomPdfPipelineOptions(PdfPipelineOptions):
 
 class RetrievalQuery(BaseModel):
     query: str
-    top_k: int = 5  # Number of results to return
+    top_k: int = 5
+
+
 
 class ModelLoggerService:
     def __init__(self, db_url: str):
@@ -174,7 +282,7 @@ class ModelLoggerService:
 
     def log_model_details(self):
         logger.info("Starting model logging process...")
-        mlflow.end_run()
+        mlflow.end_run()  # Ensure no active runs are in progress
 
         try:
             with mlflow.start_run(run_name="Model Logging") as run:
@@ -192,20 +300,24 @@ class ModelLoggerService:
 
     def _log_model_metadata(self, model_name, model_id, model_file_path, run_id):
         try:
+            # Check if the model is registered in MLflow
             registered_models = [rm.name for rm in self.client.search_registered_models()]
             if model_name not in registered_models:
                 self.client.create_registered_model(model_name)
 
+            # Fetch model metadata from Hugging Face
             model_info = self.hf_api.model_info(model_id)
-            model_description = model_info.cardData.get('model_index', [{}])[0].get('description', 'No description available.')
+            model_version = model_info.sha  # Unique identifier for version
+            model_description = self._fetch_readme(model_id) or "No description available."  # Use README.md content as description
             model_tags = model_info.tags
-            model_version = model_info.sha
 
+            # Log metadata to MLflow
             mlflow.set_tag(f"{model_name}_description", model_description)
             for tag in model_tags:
                 mlflow.set_tag(f"{model_name}_tag_{tag}", True)
             mlflow.log_param(f"{model_name}_version", model_version)
 
+            # Log model file as artifact if it exists
             if os.path.exists(model_file_path):
                 artifact_path = f"artifacts/{model_name}"
                 mlflow.log_artifact(model_file_path, artifact_path=artifact_path)
@@ -219,7 +331,30 @@ class ModelLoggerService:
         except Exception as e:
             logger.error(f"Error logging metadata for model {model_name}: {e}")
 
+    def _fetch_readme(self, model_id: str) -> Optional[str]:
+        """
+        Fetch the README.md content of a Hugging Face model to use as a description.
+        """
+        try:
+            readme_content = self.hf_api.model_info(model_id).cardData.get("model_card", "")
+            return readme_content
+        except Exception as e:
+            logger.warning(f"Unable to fetch README.md for model {model_id}: {e}")
+            return None
+        
+    def log_query(self, query: str):
+        try:
+            with mlflow.start_run(run_name="Query Logging") as run:
+                mlflow.log_param("query", query)
+                mlflow.log_param("timestamp", time.time())
+                logger.info("Query logged successfully.")
+                return {"message": "Query logged successfully"}
+        except Exception as e:
+            logger.error(f"Error logging query: {e}")
+            return {"error": str(e)}
+
 model_logger_service = ModelLoggerService(db_url=DATABASE_URL)
+
 
 
 # Device and Model Manager
@@ -717,54 +852,163 @@ async def upload_path(
         "failure_count": failure_count
     }
 
+
+
+def clean_text(text: str) -> str:
+    """Clean up text to remove unwanted characters and normalize whitespace."""
+    text = text.replace("\n", " ").strip()
+    return re.sub(r'\s+', ' ', text)
+
+
+def add_relationships(tx, relationships: List[Relationship]):
+    """Add relationships to the Neo4j database."""
+    for rel in relationships:
+        try:
+            if not rel.source or not rel.target or not rel.type:
+                logger.warning(f"Skipping invalid relationship: {rel}")
+                continue
+
+            logger.info(f"Adding Relationship: {rel.type} ({rel.source.id} -> {rel.target.id})")
+            tx.run(
+                """
+                MATCH (source:Entity {id: $source_id}), (target:Entity {id: $target_id})
+                MERGE (source)-[r:$type {properties: $properties}]->(target)
+                ON CREATE SET r.created_at = timestamp()
+                """,
+                {
+                    "source_id": rel.source.id,
+                    "target_id": rel.target.id,
+                    "type": rel.type,
+                    "properties": rel.properties or {},
+                },
+            )
+        except Exception as e:
+            logger.error(f"Failed to add relationship: {rel}. Error: {e}")
+
+
+def process_document(doc: Document):
+    """Process a document to extract nodes and relationships, adding them to Neo4j."""
+    try:
+        split_docs = text_splitter.split_documents([doc])
+        split_docs = [
+            Document(page_content=clean_text(chunk.page_content), metadata=chunk.metadata)
+            for chunk in split_docs
+        ]
+        logger.debug(f"Document split into {len(split_docs)} chunks.")
+
+        # Extract graph data and links
+        graph_docs = graph_transformer.convert_to_graph_documents(split_docs)
+        doc_links = [gliner_extractor.extract_one(chunk) for chunk in split_docs]
+
+        with driver.session() as session:
+            with session.begin_transaction() as tx:
+                for graph_doc, links in zip(graph_docs, doc_links):
+                    # Add nodes
+                    if hasattr(graph_doc, "nodes") and graph_doc.nodes:
+                        for node in graph_doc.nodes:
+                            tx.run(
+                                """
+                                MERGE (e:Entity {id: $id, name: $name, type: $type})
+                                ON CREATE SET e.created_at = timestamp()
+                                """,
+                                {
+                                    "id": node.id,
+                                    "name": node.properties.get("name", ""),
+                                    "type": node.type,
+                                },
+                            )
+                            logger.info(f"Indexed Node: {node.id}, Type: {node.type}")
+
+                    # Add relationships
+                    if hasattr(graph_doc, "edges") and graph_doc.edges:
+                        add_relationships(tx, graph_doc.edges)
+
+                    # Add links
+                    for link in links:
+                        if not link.tag or not link.kind:
+                            logger.warning(f"Skipping invalid link: {link}")
+                            continue
+                        logger.info(f"Adding Link: {link}")
+                        tx.run(
+                            """
+                            MERGE (e:Entity {name: $name})
+                            ON CREATE SET e.created_at = timestamp()
+                            RETURN e
+                            """,
+                            {"name": link.tag},
+                        )
+    except Exception as e:
+        logger.error(f"Error processing document: {doc.metadata.get('name', 'unknown')} - {e}")
+
+
 @app.post("/index_documents/")
 def index_documents(folder_path: str):
+    """
+    Index documents from the given folder into Neo4j, extracting entities and relationships
+    using GLiNER and GLiNERLinkExtractor.
+    """
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    if device.type == "cuda":
+        gpu_name = torch.cuda.get_device_name(0)
+        logger.info(f"GPU detected: {gpu_name}. Execution will use the GPU.")
+    else:
+        logger.warning("No GPU detected. Execution will fall back to CPU.")
+
     logger.info(f"Indexing documents from folder: {folder_path}")
     loader = PyPDFDirectoryLoader(folder_path)
     documents = loader.load()
     total_docs = len(documents)
-    logger.info(f"Loaded {total_docs} documents for indexing")
+    logger.info(f"Loaded {total_docs} documents for indexing.")
 
-    for doc in documents:
-        split_docs = text_splitter.split_documents([doc])
-        graph_docs = graph_transformer.convert_to_graph_documents(split_docs)
+    with ThreadPoolExecutor(max_workers=4) as executor:
+        executor.map(process_document, documents)
+
+    logger.info(f"Successfully indexed {total_docs} documents into Neo4j.")
+    return {
+        "message": f"{total_docs} documents indexed into Neo4j",
+        "gpu_used": device.type == "cuda",
+        "gpu_name": gpu_name if device.type == "cuda" else "None",
+    }
+
+@app.post("/verify_index/")
+def verify_index():
+    """
+    Verify the current state of the Neo4j database.
+    """
+    try:
         with driver.session() as session:
-            for graph_doc in graph_docs:
-                for node in graph_doc.nodes:
-                    logger.debug(f"Indexing entity: {node.id} of type {node.type}")
-                    session.run("MERGE (e:Entity {name: $name, type: $type})", {"name": node.id, "type": node.type})
+            total_nodes = session.run("MATCH (n) RETURN COUNT(n) AS total_nodes").single()["total_nodes"]
+            total_relationships = session.run("MATCH ()-[r]->() RETURN COUNT(r) AS total_relationships").single()["total_relationships"]
+            node_types = session.run("MATCH (n) RETURN labels(n) AS node_type, COUNT(n) AS count").data()
+            relationship_types = session.run("MATCH ()-[r]->() RETURN type(r) AS rel_type, COUNT(r) AS count").data()
 
-    logger.info(f"All documents indexed successfully from folder: {folder_path}")
-    return {"message": "Documents indexed in Neo4j"}
+        return JSONResponse({
+            "total_nodes": total_nodes,
+            "total_relationships": total_relationships,
+            "node_types": node_types,
+            "relationship_types": relationship_types,
+        })
 
+    except Exception as e:
+        logger.error(f"Error verifying index: {e}")
+        raise HTTPException(status_code=500, detail=f"Error verifying index: {e}")
 
 @app.post("/retrieve_documents/")
 async def retrieve_documents(request: RetrievalQuery):
-    # Create embeddings instance and vectorstore instance
-    ollama_emb = OllamaEmbeddings(model="llama3.2")
-    connection_string = "postgresql+psycopg://postgre_user:postgre_password@localhost/postgre_db"
-    vectorstore = PGVector(
-        embeddings=ollama_emb,
-        collection_name="document_embeddings",
-        connection=connection_string,
-        use_jsonb=True
-    )
-    
     # Perform the similarity search
     results = vectorstore.similarity_search(request.query, k=request.top_k)
     
     # Format and return results
     return {"results": [{"content": doc.page_content, "metadata": doc.metadata} for doc in results]}
 
-
 @app.post("/search/")
 def hybrid_search(query: str):
     store = Neo4jVector.from_existing_index(
-        ollama_emb,
+        embeddings=ollama_emb,
         url=URI,
         username=USER,
         password=PASSWORD,
-        index_name="vector",
+        index_name="vector_index",
         keyword_index_name="keyword",
         search_type="hybrid",
     )
