@@ -127,7 +127,7 @@ mlflow.set_registry_uri(DATABASE_URL)
 
 # Configure MinIO for artifact storage
 MINIO_URL = os.getenv("MINIO_URL", "http://localhost:9000")
-MINIO_ACCESS_KEY = os.getenv("MINIO_ACCESS_KEY", "minio_access_key")
+MINIO_ACCESS_KEY = os.getenv("MINIO_ACCESS_KEY", "minio")
 MINIO_SECRET_KEY = os.getenv("MINIO_SECRET_KEY", "minio123")
 MLFLOW_ARTIFACT_URI = f"s3://{MINIO_ACCESS_KEY}:{MINIO_SECRET_KEY}@{MINIO_URL}/mlflow"
 

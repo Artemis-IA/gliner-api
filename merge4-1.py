@@ -17,7 +17,7 @@ import asyncio
 import aiofiles
 
 # FastAPI et ses dépendances
-from fastapi import FastAPI, File, Request, Query, UploadFile, HTTPException, Form, Response
+from fastapi import FastAPI, File, Request, Query, UploadFile, HTTPException, Form, Response, APIRouter, status
 from fastapi.responses import JSONResponse
 from fastapi.middleware.cors import CORSMiddleware
 from enum import Enum
@@ -49,12 +49,13 @@ from docling_core.transforms.chunker.hierarchical_chunker import DocChunk
 from docling_core.transforms.chunker import BaseChunk, BaseChunker, DocMeta, HierarchicalChunker
 
 from langchain.schema import Document
-from langchain.embeddings import OpenAIEmbeddings
-from langchain.vectorstores import PGVector
+from langchain_ollama.embeddings import OllamaEmbeddings
+from langchain_postgres import PGVector
 from langchain.text_splitter import CharacterTextSplitter
 from langchain_experimental.graph_transformers.gliner import GlinerGraphTransformer
-from langchain.graphs.neo4j_graph import Neo4jGraph
-from langchain.document_loaders import PyPDFDirectoryLoader
+from langchain_community.vectorstores import Neo4jVector
+from langchain_community.graphs import Neo4jGraph
+from langchain_community.document_loaders import PyPDFDirectoryLoader
 
 # GLiNER imports
 from gliner import GLiNER
@@ -122,19 +123,19 @@ NEO4J_PASSWORD = os.getenv("NEO4J_PASSWORD", "your_password")
 neo4j_driver = GraphDatabase.driver(NEO4J_URI, auth=(NEO4J_USER, NEO4J_PASSWORD))
 
 # PostgreSQL setup for MLflow Tracking and Model Registry
-POSTGRES_USER = os.getenv("POSTGRES_USER", "postgres_user")
-POSTGRES_PASSWORD = os.getenv("POSTGRES_PASSWORD", "postgres_password")
+POSTGRES_USER = os.getenv("POSTGRES_USER", "postgre_user")
+POSTGRES_PASSWORD = os.getenv("POSTGRES_PASSWORD", "postgre_password")
 POSTGRES_HOST = os.getenv("POSTGRES_HOST", "localhost")
-POSTGRES_DB = os.getenv("POSTGRES_DB", "postgres_db")
+POSTGRES_DB = os.getenv("POSTGRES_DB", "postgre_db")
 DATABASE_URL = f"postgresql://{POSTGRES_USER}:{POSTGRES_PASSWORD}@{POSTGRES_HOST}/{POSTGRES_DB}"
-
+PG_VECTOR_STORE=f"postgresql+psycopg://{POSTGRES_USER}:{POSTGRES_PASSWORD}@{POSTGRES_HOST}/{POSTGRES_DB}"
 # Set PostgreSQL as the MLflow tracking and model registry URI
 mlflow.set_tracking_uri(DATABASE_URL)
 mlflow.set_registry_uri(DATABASE_URL)
 
 # Configure MinIO for artifact storage
 MINIO_URL = os.getenv("MINIO_URL", "http://localhost:9000")
-MINIO_ACCESS_KEY = os.getenv("MINIO_ACCESS_KEY", "minio_access_key")
+MINIO_ACCESS_KEY = os.getenv("MINIO_ACCESS_KEY", "minio")
 MINIO_SECRET_KEY = os.getenv("MINIO_SECRET_KEY", "minio123")
 MLFLOW_ARTIFACT_URI = f"s3://{MINIO_ACCESS_KEY}:{MINIO_SECRET_KEY}@{MINIO_URL}/mlflow"
 
@@ -255,12 +256,13 @@ async def on_shutdown():
     logger.info("Application arrêtée.")
 
 # Initialisation du modèle d'embedding et PGVector
-embedding_model = OpenAIEmbeddings()
+embedding_model = OllamaEmbeddings(model="llama3.2")
 connection_string = DATABASE_URL
 vectorstore = PGVector(
-    embedding_function=embedding_model,
+    embeddings=embedding_model,
     collection_name="document_embeddings",
-    connection_string=connection_string,
+    connection=PG_VECTOR_STORE,
+    use_jsonb=True
 )
 text_splitter = CharacterTextSplitter(chunk_size=1000)
 
@@ -274,9 +276,9 @@ gliner_extractor = GlinerGraphTransformer(
     allowed_nodes=config["allowed_nodes"],
     allowed_relationships=config["allowed_relationships"],
     gliner_model="knowledgator/gliner-multitask-large-v0.5",
-    glirel_model="knowledgator/gliner-multitask-large-v0.5",
-    entity_confidence_threshold=0.1,
-    relationship_confidence_threshold=0.1,
+    glirel_model="jackboyla/glirel-large-v0",
+    entity_confidence_threshold=0.3,
+    relationship_confidence_threshold=0.3,
 )
 
 class ExportFormat(str, Enum):
@@ -296,7 +298,7 @@ class TextInput(BaseModel):
 
 class NERInput(BaseModel):
     text: str = Field(..., example="IBM Watson defeated human champions in the game of Jeopardy!")
-    model_name: str = Field(..., example="knowledgator/gliner-multitask-large-v0.5")
+    ner_model_name: str = Field(..., example="knowledgator/gliner-multitask-large-v0.5")
     labels: Optional[str] = Field(None, example="person, organization, location")
     threshold: Optional[float] = Field(0.5, example=0.5)
     nested_ner: Optional[bool] = Field(False, example=False)
@@ -315,7 +317,7 @@ class AnnotateInput(BaseModel):
     sentences: List[str] = Field(..., example=["Google is building a new office in New York."])
 
 class TrainInput(BaseModel):
-    model_name: str = Field(..., example="knowledgator/gliner-multitask-large-v0.5")
+    ner_model_name: str = Field(..., example="knowledgator/gliner-multitask-large-v0.5")
     custom_model_name: str = Field(..., example="my-custom-model")
     train_data: str  # Path to the training data
     split_ratio: float = Field(0.9, example=0.9)
@@ -326,7 +328,7 @@ class TrainInput(BaseModel):
     compile_model: bool = Field(False, example=False)
 
 class EvaluateInput(BaseModel):
-    model_name: str = Field(..., example="my-custom-model")
+    ner_model_name: str = Field(..., example="my-custom-model")
 
 class EvaluateOutput(BaseModel):
     f1_score: float = Field(..., example=0.85)
@@ -402,13 +404,83 @@ device = device_manager.device
 # Global variables
 annotator = None
 model_generator = None
+# Define ModelManager
+class ModelManager:
+    def __init__(self):
+        self.device_manager = device_manager
+        self.tracker_active = False
+        self.emissions_tracker = None
+
+    async def process_document(self, doc_converter, doc_path, model_name: str):
+        # Ensure any previous MLflow run is ended before starting a new one
+        if mlflow.active_run():
+            mlflow.end_run()
+
+        with mlflow.start_run(run_name=f"Processing {model_name}"):
+            # Initialize CodeCarbon tracker if none is active
+            if not self.tracker_active:
+                try:
+                    self.emissions_tracker = EmissionsTracker(project_name="doc_processing")
+                    self.emissions_tracker.start()
+                    self.tracker_active = True
+                except Exception as e:
+                    logger.warning(f"Unable to start CodeCarbon: {e}")
+                    self.emissions_tracker = None
+
+            start_time = time.time()
+            result = list(doc_converter.convert_all([doc_path]))[0]
+            inference_time = time.time() - start_time
+
+            # Capture emissions if CodeCarbon tracker is active
+            emissions = None
+            if self.emissions_tracker and self.tracker_active:
+                try:
+                    emissions = self.emissions_tracker.stop()
+                    CARBON_EMISSIONS.set(emissions)
+                except Exception as e:
+                    logger.warning(f"Error stopping CodeCarbon tracker: {e}")
+                finally:
+                    self.tracker_active = False  # Reset for next use
+
+            # Log metrics in MLflow
+            mlflow.log_metric("inference_time", inference_time)
+            if emissions is not None:
+                mlflow.log_metric("carbon_emissions", emissions)
+
+            # Log hardware resource usage
+            self.device_manager.log_device_stats()
+            if self.device_manager.using_gpu:
+                gpu_memory_usage = GPUtil.getGPUs()[0].memoryUsed
+                mlflow.log_metric("gpu_memory_usage", gpu_memory_usage)
+
+            mlflow.log_metric("cpu_usage", psutil.cpu_percent())
+            mlflow.log_metric("memory_usage", psutil.Process().memory_info().rss / (1024 * 1024))  # MB
+
+        return result
+
+
+    def load_model(self, model_name: str):
+        # Chargement du modèle en utilisant la logique existante
+        model_path = MODEL_DIR / model_name
+        if model_path.exists():
+            model = GLiNER.from_pretrained(str(model_path)).to(device_manager.device)
+            return model
+        elif model_name in AVAILABLE_MODELS:
+            model = GLiNER.from_pretrained(model_name).to(device_manager.device)
+            model.save_pretrained(model_path)
+            return model
+        else:
+            raise HTTPException(status_code=404, detail="Modèle non trouvé.")
+
+
+model_manager = ModelManager()
 
 class AutoAnnotator:
     def __init__(
-        self, model_name: str = "knowledgator/gliner-multitask-large-v0.5",
-        device = device
+        self, model_name: str, device: torch.device, model_manager: ModelManager
     ) -> None:
-        self.model = GLiNER.from_pretrained(model_name).to(device)
+        self.model_manager = model_manager
+        self.model = self.model_manager.load_model(model_name)
         self.annotated_data = []
         self.stat = {
             "total": None,
@@ -673,61 +745,7 @@ def ensure_vector_index():
     # This function can be expanded based on the vectorstore initialization requirements
     pass
 
-# Define ModelManager
-class ModelManager:
-    def __init__(self):
-        self.device_manager = device_manager
-        self.tracker_active = False
-        self.emissions_tracker = None
 
-    async def process_document(self, doc_converter, doc_path, model_name: str):
-        # Ensure any previous MLflow run is ended before starting a new one
-        if mlflow.active_run():
-            mlflow.end_run()
-
-        with mlflow.start_run(run_name=f"Processing {model_name}"):
-            # Initialize CodeCarbon tracker if none is active
-            if not self.tracker_active:
-                try:
-                    self.emissions_tracker = EmissionsTracker(project_name="doc_processing")
-                    self.emissions_tracker.start()
-                    self.tracker_active = True
-                except Exception as e:
-                    logger.warning(f"Unable to start CodeCarbon: {e}")
-                    self.emissions_tracker = None
-
-            start_time = time.time()
-            result = list(doc_converter.convert_all([doc_path]))[0]
-            inference_time = time.time() - start_time
-
-            # Capture emissions if CodeCarbon tracker is active
-            emissions = None
-            if self.emissions_tracker and self.tracker_active:
-                try:
-                    emissions = self.emissions_tracker.stop()
-                    CARBON_EMISSIONS.set(emissions)
-                except Exception as e:
-                    logger.warning(f"Error stopping CodeCarbon tracker: {e}")
-                finally:
-                    self.tracker_active = False  # Reset for next use
-
-            # Log metrics in MLflow
-            mlflow.log_metric("inference_time", inference_time)
-            if emissions is not None:
-                mlflow.log_metric("carbon_emissions", emissions)
-
-            # Log hardware resource usage
-            self.device_manager.log_device_stats()
-            if self.device_manager.using_gpu:
-                gpu_memory_usage = GPUtil.getGPUs()[0].memoryUsed
-                mlflow.log_metric("gpu_memory_usage", gpu_memory_usage)
-
-            mlflow.log_metric("cpu_usage", psutil.cpu_percent())
-            mlflow.log_metric("memory_usage", psutil.Process().memory_info().rss / (1024 * 1024))  # MB
-
-        return result
-
-model_manager = ModelManager()
 
 @app.post("/upload/")
 async def upload_files(
@@ -915,12 +933,14 @@ async def retrieve_documents(request: RetrievalQuery):
     return {"results": [{"content": doc.page_content, "metadata": doc.metadata} for doc in results]}
 
 @app.post("/search/")
-def hybrid_search(query: str):
-    # Implement hybrid search combining Neo4j and PGVector
-    # Placeholder for actual implementation
-    return {"message": "Hybrid search not yet implemented."}
+def hybrid_search(query: str = Form(..., description="Requête de recherche hybride")):
+    # Perform the similarity search
+    results = vectorstore.similarity_search(query, k=5)
 
-@app.post("/log_models/")
+    # Format and return results
+    return {"results": [{"content": doc.page_content, "metadata": doc.metadata} for doc in results]}
+
+
 def log_models():
     """API endpoint to trigger logging of model details."""
     return model_logger_service.log_model_details()
@@ -931,204 +951,251 @@ def log_queries(query: str):
     return model_logger_service.log_query(query)
 
 # GLiNER Endpoints
-@app.post("/ner/", response_model=NEROutput)
-def ner_endpoint(input_data: NERInput):
-    model_path = f"models/{input_data.model_name}"
-    if not os.path.exists(model_path):
-        if input_data.model_name in AVAILABLE_MODELS:
-            model = GLiNER.from_pretrained(input_data.model_name).to(device)
-        else:
-            raise HTTPException(status_code=404, detail="Model not found.")
-    else:
-        model = GLiNER.from_pretrained(model_path).to(device)
+documents_router = APIRouter(prefix="/documents", tags=["Documents"])
+gliner_router = APIRouter(prefix="/gliner", tags=["GLiNER"])
+logging_router = APIRouter(prefix="/logging", tags=["Logging"])
+class GLiNERService:
+    def __init__(self, model_manager: ModelManager, s3_service: S3Service, mlflow_service: MLFlowService, doc_processor: DocumentProcessor):
+        self.model_manager = model_manager
+        self.s3_service = s3_service
+        self.mlflow_service = mlflow_service
+        self.doc_processor = doc_processor
 
-    labels = [label.strip() for label in input_data.labels.split(",")] if input_data.labels else None
-    result = annotate_text(
-        model, input_data.text, labels, input_data.threshold, input_data.nested_ner
-    )
-    return result
+    def ner(self, input_data: NERInput) -> NEROutput:
+        try:
+            model = self.model_manager.load_model(input_data.model_name)
+            labels = [label.strip() for label in input_data.labels.split(",")] if input_data.labels else None
 
-@app.post("/annotate/")
-def annotate_endpoint(input_data: AnnotateInput):
-    try:
-        labels = [label.strip() for label in input_data.labels.split(",")]
-        annotator = AutoAnnotator(input_data.model)
-        annotated_data = annotator.auto_annotate(
-            input_data.sentences, labels, input_data.prompt, input_data.threshold
-        )
-        with open(DATA_DIR / "annotated_data.json", "wt") as file:
-            json.dump(annotated_data, file)
-        return {"message": "Successfully annotated and saved as data/annotated_data.json"}
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
-
-@app.post("/upload_dataset/")
-def upload_dataset(file: UploadFile = File(...)):
-    save_path = DATA_DIR / file.filename
-    try:
-        with open(save_path, "wb") as buffer:
-            shutil.copyfileobj(file.file, buffer)
-        return {"message": f"File saved to {save_path}"}
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
-
-@app.post("/train/")
-def train_endpoint(train_input: TrainInput):
-    def load_and_prepare_data(train_path, split_ratio):
-        if not os.path.exists(train_path):
-            raise FileNotFoundError(f"The file {train_path} does not exist.")
-
-        with open(train_path, "r") as f:
-            data = json.load(f)
-        random.seed(42)
-        random.shuffle(data)
-        train_data = data[:int(len(data) * split_ratio)]
-        test_data = data[int(len(data) * split_ratio):]
-        return train_data, test_data
-
-    def create_models_directory():
-        if not os.path.exists(MODEL_DIR):
-            os.makedirs(MODEL_DIR)
-
-    try:
-        create_models_directory()
-
-        if train_input.model_name in AVAILABLE_MODELS:
-            model = GLiNER.from_pretrained(train_input.model_name)
-        else:
-            model_path = MODEL_DIR / train_input.model_name
-            if os.path.exists(model_path):
-                model = GLiNER.from_pretrained(model_path)
-            else:
-                raise HTTPException(status_code=404, detail="Model not found.")
-
-        train_data, test_data = load_and_prepare_data(train_input.train_data, train_input.split_ratio)
-
-        with open(DATA_DIR / "test.json", "wt") as file:
-            json.dump(test_data, file)
-
-        train_dataset = GLiNERDataset(train_data, model.config, data_processor=model.data_processor)
-        test_dataset = GLiNERDataset(test_data, model.config, data_processor=model.data_processor)
-        data_collator = DataCollatorWithPadding(model.config)
-
-        if train_input.compile_model:
-            torch.set_float32_matmul_precision('high')
-            model.to(device)
-            model.compile_for_training()
-        else:
-            model.to(device)
-
-        training_args = TrainingArguments(
-            output_dir=MODEL_DIR,
-            learning_rate=train_input.learning_rate,
-            weight_decay=train_input.weight_decay,
-            others_lr=train_input.learning_rate,
-            others_weight_decay=train_input.weight_decay,
-            lr_scheduler_type="linear",
-            warmup_ratio=0.1,
-            per_device_train_batch_size=train_input.batch_size,
-            per_device_eval_batch_size=train_input.batch_size,
-            num_train_epochs=train_input.epochs,
-            evaluation_strategy="epoch",
-            save_steps=1000,
-            save_total_limit=10,
-            dataloader_num_workers=8,
-            use_cpu=(device == torch.device('cpu')),
-            report_to="none",
-        )
-
-        trainer = Trainer(
-            model=model,
-            args=training_args,
-            train_dataset=train_dataset,
-            eval_dataset=test_dataset,
-            tokenizer=model.data_processor.transformer_tokenizer,
-            data_collator=data_collator,
-        )
-
-        trainer.train()
-        model.save_pretrained(MODEL_DIR / train_input.custom_model_name)
-
-        return {"message": "Training completed successfully."}
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
-
-@app.post("/evaluate/", response_model=EvaluateOutput)
-def evaluate_endpoint(evaluate_input: EvaluateInput):
-    try:
-        model_path = MODEL_DIR / evaluate_input.model_name
-        if not os.path.exists(model_path):
-            raise HTTPException(status_code=404, detail="Model not found.")
-
-        model = GLiNER.from_pretrained(str(model_path), load_tokenizer=True, local_files_only=True)
-
-        with open(DATA_DIR / 'test.json', 'r') as file:
-            test_data = json.load(file)
-
-        with open(DATA_DIR / 'annotated_data.json', 'r') as file:
-            annotated_data = json.load(file)
-
-        # Extract all labels from each example
-        all_labels = []
-        for example in annotated_data:
-            ner_data = example.get("ner", [])
-            for entity in ner_data:
-                label = entity[2]  # Assuming the label is the third element in the entity list
-                if label not in all_labels:
-                    all_labels.append(label)
-
-        def get_for_one_path(test_dataset, entity_types):
-            # Evaluate the model
-            results, f1 = model.evaluate(
-                test_dataset, flat_ner=True, threshold=0.5, batch_size=12, entity_types=entity_types
+            result = annotate_text(
+                model, input_data.text, labels, input_data.threshold, input_data.nested_ner
             )
-            return results, f1
+            return NEROutput(**result)
+        except Exception as e:
+            logger.error(f"Erreur dans l'endpoint NER : {e}")
+            raise HTTPException(status_code=500, detail=str(e))
 
-        results, f1 = get_for_one_path(test_data, all_labels)
-        return EvaluateOutput(f1_score=f1, results=results)
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
+    def annotate(self, input_data: AnnotateInput) -> Dict[str, Any]:
+        try:
+            # Intégration de Docling pour extraire des données structurées
+            if input_data.document_id:
+                # Récupérer le document structuré à partir de l'ID
+                structured_data = self.doc_processor.get_structured_data(input_data.document_id)
+                sentences = [item['text'] for item in structured_data]
+            else:
+                sentences = input_data.sentences
 
-@app.post("/zip_and_upload/")
-def zip_and_upload_endpoint(model_name: str, drive_path: str):
-    def zip_directory(model_name):
-        model_path = MODEL_DIR / model_name
-        zip_path = f"{model_path}.zip"
+            labels = [label.strip() for label in input_data.labels.split(",")]
+            annotator = AutoAnnotator(
+                input_data.model, device=device_manager.device, model_manager=self.model_manager
+            )
+            annotated_data = annotator.auto_annotate(
+                sentences, labels, input_data.prompt, input_data.threshold
+            )
 
-        if os.path.exists(model_path):
+            # Sauvegarde et journalisation
+            output_filename = f"annotated_data_{datetime.now().strftime('%Y%m%d_%H%M%S')}.json"
+            output_path = DATA_DIR / output_filename
+            with open(output_path, "w") as file:
+                json.dump(annotated_data, file)
+
+            s3_url = self.s3_service.upload_file(output_path, self.s3_service.output_bucket)
+            self.mlflow_service.log_params({
+                "model": input_data.model,
+                "labels": input_data.labels,
+                "threshold": input_data.threshold,
+                "prompt": input_data.prompt,
+                "document_id": input_data.document_id
+            })
+            self.mlflow_service.log_metrics({"annotated_sentences": len(annotated_data)})
+
+            return {"message": f"Annotations sauvegardées sur {s3_url}"}
+        except Exception as e:
+            logger.error(f"Erreur dans l'endpoint annotate : {e}")
+            raise HTTPException(status_code=500, detail=str(e))
+
+    def train(self, train_input: TrainInput) -> Dict[str, Any]:
+        try:
+            device = device_manager.device
+            custom_model_path = MODEL_DIR / train_input.custom_model_name
+            custom_model_path.mkdir(parents=True, exist_ok=True)
+
+            model = self.model_manager.load_model(train_input.model_name)
+
+            # Intégration de Docling pour utiliser des données structurées pour l'entraînement
+            if train_input.use_docling_data:
+                train_data = self.doc_processor.get_training_data_from_docling()
+            else:
+                train_data_path = DATA_DIR / train_input.train_data
+                if not train_data_path.exists():
+                    raise HTTPException(status_code=404, detail="Données d'entraînement non trouvées.")
+                with open(train_data_path, "r") as f:
+                    train_data = json.load(f)
+
+            # Division des données et préparation des datasets
+            random.seed(42)
+            random.shuffle(train_data)
+            split_idx = int(len(train_data) * train_input.split_ratio)
+            train_data_split = train_data[:split_idx]
+            test_data = train_data[split_idx:]
+
+            # Sauvegarde des données de test
+            test_data_path = DATA_DIR / "test.json"
+            with open(test_data_path, "w") as f:
+                json.dump(test_data, f)
+
+            # Création des datasets GLiNER
+            train_dataset = GLiNERDataset(train_data_split, model.config, data_processor=model.data_processor)
+            test_dataset = GLiNERDataset(test_data, model.config, data_processor=model.data_processor)
+            data_collator = DataCollatorWithPadding(model.config)
+
+            # Arguments d'entraînement
+            training_args = TrainingArguments(
+                output_dir=str(custom_model_path),
+                learning_rate=train_input.learning_rate,
+                weight_decay=train_input.weight_decay,
+                per_device_train_batch_size=train_input.batch_size,
+                per_device_eval_batch_size=train_input.batch_size,
+                num_train_epochs=train_input.epochs,
+                evaluation_strategy="epoch",
+                save_steps=1000,
+                save_total_limit=10,
+                dataloader_num_workers=4,
+                use_cpu=(device.type == 'cpu'),
+                report_to="none",
+            )
+
+            # Initialisation du Trainer
+            trainer = Trainer(
+                model=model,
+                args=training_args,
+                train_dataset=train_dataset,
+                eval_dataset=test_dataset,
+                tokenizer=model.data_processor.transformer_tokenizer,
+                data_collator=data_collator,
+            )
+
+            # Entraînement et journalisation
+            with mlflow.start_run(run_name="GLiNER Training"):
+                self.mlflow_service.log_params({
+                    "model_name": train_input.model_name,
+                    "custom_model_name": train_input.custom_model_name,
+                    "learning_rate": train_input.learning_rate,
+                    "weight_decay": train_input.weight_decay,
+                    "batch_size": train_input.batch_size,
+                    "epochs": train_input.epochs,
+                    "split_ratio": train_input.split_ratio,
+                    "use_docling_data": train_input.use_docling_data
+                })
+
+                trainer.train()
+
+                model.save_pretrained(custom_model_path)
+                s3_url = self.s3_service.upload_file(custom_model_path, self.s3_service.output_bucket)
+
+                mlflow.log_artifacts(str(custom_model_path), artifact_path="models")
+                self.mlflow_service.log_metrics({"training_completed": 1})
+
+            return {"message": f"Entraînement terminé. Modèle sauvegardé sur {s3_url}"}
+        except Exception as e:
+            logger.error(f"Erreur dans l'endpoint train : {e}")
+            raise HTTPException(status_code=500, detail=str(e))
+
+    def evaluate(self, evaluate_input: EvaluateInput) -> EvaluateOutput:
+        try:
+            device = device_manager.device
+            model = self.model_manager.load_model(evaluate_input.model_name)
+
+            test_data_path = DATA_DIR / 'test.json'
+            if not test_data_path.exists():
+                raise HTTPException(status_code=404, detail="Données de test non trouvées.")
+            with open(test_data_path, 'r') as f:
+                test_data = json.load(f)
+
+            test_dataset = GLiNERDataset(test_data, model.config, data_processor=model.data_processor)
+
+            results, f1_score = model.evaluate(
+                test_dataset,
+                flat_ner=True,
+                threshold=0.5,
+                batch_size=8
+            )
+
+            with mlflow.start_run(run_name="GLiNER Evaluation"):
+                self.mlflow_service.log_metrics({"f1_score": f1_score})
+                mlflow.log_param("model_name", evaluate_input.model_name)
+
+            return EvaluateOutput(f1_score=f1_score, results=results)
+        except Exception as e:
+            logger.error(f"Erreur dans l'endpoint evaluate : {e}")
+            raise HTTPException(status_code=500, detail=str(e))
+
+    def zip_and_upload(self, model_name: str) -> Dict[str, Any]:
+        try:
+            model_path = MODEL_DIR / model_name
+            zip_path = model_path.with_suffix('.zip')
+
+            if not model_path.exists():
+                raise HTTPException(status_code=404, detail=f"Répertoire du modèle '{model_name}' non trouvé.")
+
             with zipfile.ZipFile(zip_path, 'w', zipfile.ZIP_DEFLATED) as zipf:
                 for root, dirs, files in os.walk(model_path):
                     for file in files:
-                        file_path = os.path.join(root, file)
-                        arcname = os.path.relpath(file_path, start=model_path)
-                        zipf.write(file_path, arcname)
-            return zip_path
-        else:
-            return None
+                        file_path = Path(root) / file
+                        zipf.write(file_path, arcname=file_path.relative_to(model_path))
 
-    def upload_to_drive(zip_path, drive_folder='My Drive'):
-        # Placeholder for actual upload logic
-        if zip_path and os.path.exists(zip_path):
-            destination_dir = os.path.join(drive_folder)
-            os.makedirs(destination_dir, exist_ok=True)
-            destination = os.path.join(destination_dir, os.path.basename(zip_path))
-            shutil.move(zip_path, destination)
-            return f"File uploaded to {destination}"
-        else:
-            return "Zip file not found."
+            s3_url = self.s3_service.upload_file(zip_path, self.s3_service.output_bucket)
+            if s3_url:
+                zip_path.unlink()
+                with mlflow.start_run(run_name="Model Zip and Upload"):
+                    mlflow.log_param("model_name", model_name)
+                    mlflow.log_artifact(str(zip_path), artifact_path="model_zips")
+                return {"message": f"Modèle '{model_name}' compressé et téléchargé sur {s3_url}"}
+            else:
+                raise HTTPException(status_code=500, detail="Échec du téléchargement du fichier zip sur S3.")
+        except Exception as e:
+            logger.error(f"Erreur dans l'endpoint zip_and_upload : {e}")
+            raise HTTPException(status_code=500, detail=str(e))
 
-    try:
-        zip_path = zip_directory(model_name)
-        if zip_path:
-            upload_message = upload_to_drive(zip_path, drive_folder=drive_path)
-            return {"message": f"Directory '{model_name}' zipped successfully as '{zip_path}'. {upload_message}"}
-        else:
-            raise HTTPException(status_code=404, detail=f"Directory '{model_name}' not found.")
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
+# Instanciation du GLiNERService
+doc_processor = DocumentProcessor(s3_service, mlflow_service, SessionLocal)
+gliner_service = GLiNERService(model_manager, s3_service, mlflow_service, doc_processor)
 
-# Metrics endpoint for Prometheus
+# GLiNER Router Endpoints
+@gliner_router.post("/ner/", response_model=NEROutput)
+def ner_endpoint(input_data: NERInput):
+    return gliner_service.ner(input_data)
+
+@gliner_router.post("/annotate/")
+def annotate_endpoint(input_data: AnnotateInput):
+    return gliner_service.annotate(input_data)
+
+@gliner_router.post("/train/")
+def train_endpoint(train_input: TrainInput):
+    return gliner_service.train(train_input)
+
+@gliner_router.post("/evaluate/", response_model=EvaluateOutput)
+def evaluate_endpoint(evaluate_input: EvaluateInput):
+    return gliner_service.evaluate(evaluate_input)
+
+@gliner_router.post("/zip_and_upload/")
+def zip_and_upload_endpoint(model_name: str = Form(..., description="Nom du modèle à compresser et uploader")):
+    return gliner_service.zip_and_upload(model_name)
+
+# Logging Router Endpoints
+@logging_router.post("/log_models/")
+def log_models():
+    return model_logger_service.log_model_details()
+
+@logging_router.post("/log_queries/")
+def log_queries(query: str = Form(..., description="Requête à journaliser")):
+    return model_logger_service.log_query(query)
+
+# Inclusion des routers dans l'application principale
+app.include_router(documents_router)
+app.include_router(gliner_router)
+app.include_router(logging_router)
+
+# L'endpoint pour les métriques reste inchangé
 @app.get("/metrics")
 async def metrics():
-    from prometheus_client import generate_latest, CONTENT_TYPE_LATEST
     return Response(generate_latest(), media_type=CONTENT_TYPE_LATEST)

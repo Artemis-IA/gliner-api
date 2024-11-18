@@ -1,0 +1,1 @@
+[{"text": "Please annotate the following text:\nGoogle is building a new office in New York.", "entities": [{"entity": "organization", "word": "Google", "start": 36, "end": 42, "score": 0.9299769401550293}, {"entity": "location", "word": "New York", "start": 71, "end": 79, "score": 0.9935742616653442}]}]
