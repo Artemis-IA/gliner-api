@@ -994,6 +994,74 @@ def index_documents(folder_path: str):
         "gpu_name": gpu_name if device.type == "cuda" else "None",
     }
 
+
+@app.post("/index_document/")
+async def index_document(file: UploadFile = File(...)):
+    """
+    Index a single document into Neo4j by extracting entities and relationships.
+    """
+    REQUEST_COUNT.inc()
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    if device.type == "cuda":
+        gpu_name = torch.cuda.get_device_name(0)
+        logger.info(f"GPU detected: {gpu_name}. Execution will use the GPU.")
+    else:
+        logger.warning("No GPU detected. Execution will fall back to CPU.")
+
+    # Save uploaded file temporarily
+    temp_file = OUTPUT_DIR / file.filename
+    async with aiofiles.open(temp_file, 'wb') as out_file:
+        content = await file.read()
+        await out_file.write(content)
+
+    # Load and process the document
+    try:
+        loader = PyPDFDirectoryLoader(temp_file.parent)
+        documents = loader.load()
+        if not documents:
+            raise ValueError("No valid documents found in the uploaded file.")
+        logger.info(f"Processing document: {file.filename}")
+
+        # Process the document
+        process_document(documents[0])
+        logger.info(f"Successfully indexed document: {file.filename} into Neo4j.")
+        return {"message": f"Document {file.filename} indexed into Neo4j successfully."}
+    except Exception as e:
+        logger.error(f"Error indexing document {file.filename}: {e}")
+        raise HTTPException(status_code=500, detail=f"Error indexing document: {e}")
+    finally:
+        temp_file.unlink()  # Remove temporary file
+
+
+@app.post("/index_document_path/")
+def index_document_path(folder_path: str):
+    """
+    Index all documents from the given folder into Neo4j.
+    """
+    REQUEST_COUNT.inc()
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    if device.type == "cuda":
+        gpu_name = torch.cuda.get_device_name(0)
+        logger.info(f"GPU detected: {gpu_name}. Execution will use the GPU.")
+    else:
+        logger.warning("No GPU detected. Execution will fall back to CPU.")
+
+    logger.info(f"Indexing documents from folder: {folder_path}")
+    loader = PyPDFDirectoryLoader(folder_path)
+    documents = loader.load()
+    total_docs = len(documents)
+    logger.info(f"Loaded {total_docs} documents for indexing.")
+
+    with ThreadPoolExecutor(max_workers=4) as executor:
+        executor.map(process_document, documents)
+
+    logger.info(f"Successfully indexed {total_docs} documents into Neo4j.")
+    return {
+        "message": f"{total_docs} documents indexed into Neo4j",
+        "gpu_used": device.type == "cuda",
+        "gpu_name": gpu_name if device.type == "cuda" else "None",
+    }
+
 @app.post("/verify_index/")
 def verify_index():
     """
