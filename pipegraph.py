@@ -140,6 +140,11 @@ engine = create_engine(DATABASE_URL)
 Base = declarative_base()
 SessionLocal = sessionmaker(bind=engine)
 
+
+# FastAPI App
+app = FastAPI(title="Document Processing API", version="2.0.0")
+logger.add("logs/conversion_{time}.log", rotation="1 day", retention="7 days", level="INFO")
+
 # S3 (MinIO) setup for artifact storage
 s3_client = boto3.client(
     's3',
@@ -382,8 +387,6 @@ class ModelLoggerService:
 
 model_logger_service = ModelLoggerService(db_url=DATABASE_URL)
 
-
-
 # Device and Model Manager
 class DeviceManager:
     def __init__(self):
@@ -404,6 +407,7 @@ class DeviceManager:
         CPU_USAGE.set(cpu_percent)
         MEMORY_USAGE.set(memory.rss)
         logger.info(f"CPU: {cpu_percent}% | Mémoire: {memory.rss / 1024 / 1024:.2f}MB")
+
 class ModelManager:
     def __init__(self):
         self.device_manager = DeviceManager()
@@ -792,333 +796,232 @@ s3_service = S3Service(
 )    
 mlflow_service = MLFlowService(db_url=DATABASE_URL)
 
-@app.post("/upload/")
-async def upload_files(
-    files: List[UploadFile] = File(...),
-    export_formats: List[ExportFormat] = Query(default=[ExportFormat.json]),
-    use_ocr: bool = False,
-    export_figures: bool = True,
-    export_tables: bool = True,
-    enrich_figures: bool = False
-):
-    REQUEST_COUNT.inc()
-    logger.info(f"Received {len(files)} files for upload")
+class DocumentProcessingPipeline: 
+    def __init__(self, s3_service: S3Service, mlflow_service: MLFlowService, session_factory):
+        self.s3_service = s3_service
+        self.mlflow_service = mlflow_service
+        self.doc_log_service = DocumentLogService(session_factory)
 
-    doc_processor = DocumentProcessor(s3_service, mlflow_service, SessionLocal)
-    converter = doc_processor.create_converter(use_ocr, export_figures, export_tables, enrich_figures)
-    success_count, partial_success_count, failure_count = 0, 0, 0
+    def create_converter(self, use_ocr: bool, export_figures: bool, export_tables: bool, enrich_figures: bool):
+        options = CustomPdfPipelineOptions()
+        options.do_ocr = use_ocr
+        options.generate_page_images = True
+        options.generate_table_images = export_tables
+        options.generate_picture_images = export_figures
+        options.do_picture_classifier = enrich_figures
+        return DocumentConverter(
+            allowed_formats=[InputFormat.PDF, InputFormat.DOCX],
+            format_options={InputFormat.PDF: PdfFormatOption(pipeline_options=options, backend=PyPdfiumDocumentBackend)}
+        )
 
-    for file in files:
-        temp_file = OUTPUT_DIR / file.filename
-        async with aiofiles.open(temp_file, 'wb') as out_file:
-            content = await file.read()
-            await out_file.write(content)
-        input_s3_url = s3_service.upload_file(temp_file, s3_service.input_bucket)
-        doc_processor.doc_log_service.log_document(file.filename, input_s3_url)
-
-        with mlflow.start_run(run_name="Document Conversion"):
-            result = await model_manager.process_document(converter, temp_file, model_name="Docling")
-            if result:
-                counts = doc_processor.export_document(result, OUTPUT_DIR, export_formats, export_figures, export_tables)
-                success_count += counts[0]
-                partial_success_count += counts[1]
-                failure_count += counts[2]
-
-    return {
-        "message": "Documents processed and stored successfully",
-        "uploaded_to": s3_service.output_bucket,
-        "success_count": success_count,
-        "partial_success_count": partial_success_count,
-        "failure_count": failure_count
-    }
-
-
-@app.post("/upload_path/")
-async def upload_path(
-    file_path: str = Form("/home/pi/Documents/IF-SRV/4pdfs_subset/"),
-    export_formats: List[ExportFormat] = Query(default=[ExportFormat.json]),
-    use_ocr: bool = False,
-    export_figures: bool = True,
-    export_tables: bool = True,
-    enrich_figures: bool = False
-):
-    REQUEST_COUNT.inc()
-    logger.info(f"Processing directory: {file_path}")
-
-    input_dir_path = Path(file_path)
-    input_file_paths = [
-        file for file in input_dir_path.glob('*')
-        if file.suffix.lower() in ['.pdf', '.docx']
-    ]
-
-    doc_processor = DocumentProcessor(s3_service, mlflow_service, SessionLocal)
-    converter = doc_processor.create_converter(use_ocr, export_figures, export_tables, enrich_figures)
-    success_count, partial_success_count, failure_count = 0, 0, 0
-
-    for doc_path in input_file_paths:
-        input_s3_url = s3_service.upload_file(doc_path, s3_service.input_bucket)
-        doc_processor.doc_log_service.log_document(doc_path.name, input_s3_url)
-
-        with mlflow.start_run(run_name="Document Conversion"):
-            result = await model_manager.process_document(converter, doc_path, model_name="Docling")
-            if result:
-                counts = doc_processor.export_document(result, OUTPUT_DIR, export_formats, export_figures, export_tables)
-                success_count += counts[0]
-                partial_success_count += counts[1]
-                failure_count += counts[2]
-
-    return {
-        "message": "Directory processed and stored successfully",
-        "uploaded_to": s3_service.output_bucket,
-        "success_count": success_count,
-        "partial_success_count": partial_success_count,
-        "failure_count": failure_count
-    }
-
-
-
-def clean_text(text: str) -> str:
-    """Clean up text to remove unwanted characters and normalize whitespace."""
-    text = text.replace("\n", " ").strip()
-    return re.sub(r'\s+', ' ', text)
-
-
-def add_relationships(tx, relationships: List[Relationship]):
-    """Add relationships to the Neo4j database."""
-    for rel in relationships:
+    async def preprocess_document(self, file_path: Path, converter: DocumentConverter):
+        """Effectuer le prétraitement d'un document via Docling."""
+        logger.info(f"Prétraitement du document : {file_path.name}")
         try:
-            if not rel.source or not rel.target or not rel.type:
-                logger.warning(f"Skipping invalid relationship: {rel}")
-                continue
+            result = list(converter.convert_all([file_path]))[0]
+            return result
+        except Exception as e:
+            logger.error(f"Erreur lors du prétraitement du document {file_path.name}: {e}")
+            return None
 
-            logger.info(f"Adding Relationship: {rel.type} ({rel.source.id} -> {rel.target.id})")
+    def process_graph_extraction(self, document: DoclingDocument):
+        """Extraire des entités et relations avec GLiNER et Graph Transformer."""
+        try:
+            logger.info(f"Extraction des entités et relations pour le document : {document.meta.source}")
+            split_docs = text_splitter.split_documents([document])
+            split_docs = [
+                Document(page_content=clean_text(chunk.page_content), metadata=chunk.metadata)
+                for chunk in split_docs
+            ]
+
+            # Utilisation de GLiNER et Graph Transformer
+            graph_docs = graph_transformer.convert_to_graph_documents(split_docs)
+            doc_links = [gliner_extractor.extract_one(chunk) for chunk in split_docs]
+
+            with driver.session() as session:
+                with session.begin_transaction() as tx:
+                    for graph_doc, links in zip(graph_docs, doc_links):
+                        self._add_nodes_to_neo4j(tx, graph_doc.nodes)
+                        self._add_edges_to_neo4j(tx, graph_doc.edges)
+                        self._add_links_to_neo4j(tx, links)
+        except Exception as e:
+            logger.error(f"Erreur lors de l'extraction des entités et relations : {e}")
+
+    @staticmethod
+    def _add_nodes_to_neo4j(tx, nodes):
+        if not nodes:
+            return
+        for node in nodes:
+            tx.run(
+                """
+                MERGE (e:Entity {id: $id, name: $name, type: $type})
+                ON CREATE SET e.created_at = timestamp()
+                """,
+                {
+                    "id": node.id,
+                    "name": node.properties.get("name", ""),
+                    "type": node.type,
+                },
+            )
+            logger.info(f"Indexé Node: {node.id}, Type: {node.type}")
+
+    @staticmethod
+    def _add_edges_to_neo4j(tx, edges):
+        if not edges:
+            return
+        for edge in edges:
             tx.run(
                 """
                 MATCH (source:Entity {id: $source_id}), (target:Entity {id: $target_id})
-                MERGE (source)-[r:$type {properties: $properties}]->(target)
-                ON CREATE SET r.created_at = timestamp()
+                MERGE (source)-[r:$type]->(target)
                 """,
                 {
-                    "source_id": rel.source.id,
-                    "target_id": rel.target.id,
-                    "type": rel.type,
-                    "properties": rel.properties or {},
+                    "source_id": edge.source.id,
+                    "target_id": edge.target.id,
+                    "type": edge.type,
                 },
             )
-        except Exception as e:
-            logger.error(f"Failed to add relationship: {rel}. Error: {e}")
+
+    @staticmethod
+    def _add_links_to_neo4j(tx, links):
+        if not links:
+            return
+        for link in links:
+            tx.run(
+                """
+                MERGE (e:Entity {name: $name})
+                ON CREATE SET e.created_at = timestamp()
+                RETURN e
+                """,
+                {"name": link.tag},
+            )
+
+mlflow_service = MLFlowService(db_url=DATABASE_URL)
+doc_processor = DocumentProcessingPipeline(s3_service, mlflow_service, SessionLocal)
+
+OUTPUT_DIR = Path("output")
+OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
 
 
-def process_document(doc: Document):
-    """Process a document to extract nodes and relationships, adding them to Neo4j."""
+@app.post("/process_document/")
+async def process_document_endpoint(
+    file: UploadFile = File(...),
+    use_ocr: bool = False,
+    export_figures: bool = True,
+    export_tables: bool = True,
+    enrich_figures: bool = False,
+):
+    """
+    Endpoint to preprocess and index a single document into Neo4j.
+    """
+    logger.info(f"Processing file: {file.filename}")
+    converter = doc_processor.create_converter(use_ocr, export_figures, export_tables, enrich_figures)
+
+    # Save the uploaded file temporarily
+    temp_file = OUTPUT_DIR / file.filename
+    async with aiofiles.open(temp_file, "wb") as out_file:
+        await out_file.write(await file.read())
+
     try:
-        split_docs = text_splitter.split_documents([doc])
-        split_docs = [
-            Document(page_content=clean_text(chunk.page_content), metadata=chunk.metadata)
-            for chunk in split_docs
-        ]
-        logger.debug(f"Document split into {len(split_docs)} chunks.")
+        # Preprocess the document with Docling
+        result = await doc_processor.preprocess_document(temp_file, converter)
+        if not result:
+            raise HTTPException(status_code=500, detail="Error preprocessing document.")
 
-        # Extract graph data and links
-        graph_docs = graph_transformer.convert_to_graph_documents(split_docs)
-        doc_links = [gliner_extractor.extract_one(chunk) for chunk in split_docs]
+        # Extract entities and relationships using GLiNER
+        doc_processor.process_graph_extraction(result.document)
+        logger.info(f"Successfully processed and indexed document: {file.filename}")
 
-        with driver.session() as session:
-            with session.begin_transaction() as tx:
-                for graph_doc, links in zip(graph_docs, doc_links):
-                    # Add nodes
-                    if hasattr(graph_doc, "nodes") and graph_doc.nodes:
-                        for node in graph_doc.nodes:
-                            tx.run(
-                                """
-                                MERGE (e:Entity {id: $id, name: $name, type: $type})
-                                ON CREATE SET e.created_at = timestamp()
-                                """,
-                                {
-                                    "id": node.id,
-                                    "name": node.properties.get("name", ""),
-                                    "type": node.type,
-                                },
-                            )
-                            logger.info(f"Indexed Node: {node.id}, Type: {node.type}")
-
-                    # Add relationships
-                    if hasattr(graph_doc, "edges") and graph_doc.edges:
-                        add_relationships(tx, graph_doc.edges)
-
-                    # Add links
-                    for link in links:
-                        if not link.tag or not link.kind:
-                            logger.warning(f"Skipping invalid link: {link}")
-                            continue
-                        logger.info(f"Adding Link: {link}")
-                        tx.run(
-                            """
-                            MERGE (e:Entity {name: $name})
-                            ON CREATE SET e.created_at = timestamp()
-                            RETURN e
-                            """,
-                            {"name": link.tag},
-                        )
+        return {"message": f"Document {file.filename} successfully processed and indexed into Neo4j."}
     except Exception as e:
-        logger.error(f"Error processing document: {doc.metadata.get('name', 'unknown')} - {e}")
+        logger.error(f"Error processing document {file.filename}: {e}")
+        raise HTTPException(status_code=500, detail=f"Error processing document: {e}")
+    finally:
+        temp_file.unlink()
+
+
+@app.post("/process_directory/")
+async def process_directory_endpoint(
+    folder_path: str,
+    use_ocr: bool = False,
+    export_figures: bool = True,
+    export_tables: bool = True,
+    enrich_figures: bool = False,
+):
+    """
+    Endpoint to process all documents in a folder.
+    """
+    logger.info(f"Processing directory: {folder_path}")
+    converter = doc_processor.create_converter(use_ocr, export_figures, export_tables, enrich_figures)
+
+    input_dir = Path(folder_path)
+    input_files = [file for file in input_dir.glob("*.pdf")]
+
+    if not input_files:
+        raise HTTPException(status_code=400, detail="No valid files found in the directory.")
+
+    success_count = 0
+    for file in input_files:
+        result = await doc_processor.preprocess_document(file, converter)
+        if result:
+            doc_processor.process_graph_extraction(result.document)
+            success_count += 1
+
+    logger.info(f"Successfully processed {success_count}/{len(input_files)} documents from the directory.")
+    return {"message": f"{success_count}/{len(input_files)} documents successfully processed and indexed into Neo4j."}
 
 
 @app.post("/index_documents/")
 def index_documents(folder_path: str):
     """
-    Index documents from the given folder into Neo4j, extracting entities and relationships
-    using GLiNER and GLiNERLinkExtractor.
+    Directly index documents from the folder into Neo4j.
     """
-    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    if device.type == "cuda":
-        gpu_name = torch.cuda.get_device_name(0)
-        logger.info(f"GPU detected: {gpu_name}. Execution will use the GPU.")
-    else:
-        logger.warning("No GPU detected. Execution will fall back to CPU.")
-
     logger.info(f"Indexing documents from folder: {folder_path}")
     loader = PyPDFDirectoryLoader(folder_path)
     documents = loader.load()
     total_docs = len(documents)
-    logger.info(f"Loaded {total_docs} documents for indexing.")
 
     with ThreadPoolExecutor(max_workers=4) as executor:
-        executor.map(process_document, documents)
+        executor.map(doc_processor.process_graph_extraction, documents)
 
     logger.info(f"Successfully indexed {total_docs} documents into Neo4j.")
-    return {
-        "message": f"{total_docs} documents indexed into Neo4j",
-        "gpu_used": device.type == "cuda",
-        "gpu_name": gpu_name if device.type == "cuda" else "None",
-    }
+    return {"message": f"{total_docs} documents indexed into Neo4j"}
 
-
-@app.post("/index_document/")
-async def index_document(file: UploadFile = File(...)):
-    """
-    Index a single document into Neo4j by extracting entities and relationships.
-    """
-    REQUEST_COUNT.inc()
-    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    if device.type == "cuda":
-        gpu_name = torch.cuda.get_device_name(0)
-        logger.info(f"GPU detected: {gpu_name}. Execution will use the GPU.")
-    else:
-        logger.warning("No GPU detected. Execution will fall back to CPU.")
-
-    # Save uploaded file temporarily
-    temp_file = OUTPUT_DIR / file.filename
-    async with aiofiles.open(temp_file, 'wb') as out_file:
-        content = await file.read()
-        await out_file.write(content)
-
-    # Load and process the document
-    try:
-        loader = PyPDFDirectoryLoader(temp_file.parent)
-        documents = loader.load()
-        if not documents:
-            raise ValueError("No valid documents found in the uploaded file.")
-        logger.info(f"Processing document: {file.filename}")
-
-        # Process the document
-        process_document(documents[0])
-        logger.info(f"Successfully indexed document: {file.filename} into Neo4j.")
-        return {"message": f"Document {file.filename} indexed into Neo4j successfully."}
-    except Exception as e:
-        logger.error(f"Error indexing document {file.filename}: {e}")
-        raise HTTPException(status_code=500, detail=f"Error indexing document: {e}")
-    finally:
-        temp_file.unlink()  # Remove temporary file
-
-
-@app.post("/index_document_path/")
-def index_document_path(folder_path: str):
-    """
-    Index all documents from the given folder into Neo4j.
-    """
-    REQUEST_COUNT.inc()
-    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    if device.type == "cuda":
-        gpu_name = torch.cuda.get_device_name(0)
-        logger.info(f"GPU detected: {gpu_name}. Execution will use the GPU.")
-    else:
-        logger.warning("No GPU detected. Execution will fall back to CPU.")
-
-    logger.info(f"Indexing documents from folder: {folder_path}")
-    loader = PyPDFDirectoryLoader(folder_path)
-    documents = loader.load()
-    total_docs = len(documents)
-    logger.info(f"Loaded {total_docs} documents for indexing.")
-
-    with ThreadPoolExecutor(max_workers=4) as executor:
-        executor.map(process_document, documents)
-
-    logger.info(f"Successfully indexed {total_docs} documents into Neo4j.")
-    return {
-        "message": f"{total_docs} documents indexed into Neo4j",
-        "gpu_used": device.type == "cuda",
-        "gpu_name": gpu_name if device.type == "cuda" else "None",
-    }
 
 @app.post("/verify_index/")
 def verify_index():
     """
-    Verify the current state of the Neo4j database.
+    Verify the state of the Neo4j database.
     """
     try:
         with driver.session() as session:
             total_nodes = session.run("MATCH (n) RETURN COUNT(n) AS total_nodes").single()["total_nodes"]
             total_relationships = session.run("MATCH ()-[r]->() RETURN COUNT(r) AS total_relationships").single()["total_relationships"]
-            node_types = session.run("MATCH (n) RETURN labels(n) AS node_type, COUNT(n) AS count").data()
-            relationship_types = session.run("MATCH ()-[r]->() RETURN type(r) AS rel_type, COUNT(r) AS count").data()
 
-        return JSONResponse({
-            "total_nodes": total_nodes,
-            "total_relationships": total_relationships,
-            "node_types": node_types,
-            "relationship_types": relationship_types,
-        })
-
+        logger.info(f"Neo4j contains {total_nodes} nodes and {total_relationships} relationships.")
+        return {"total_nodes": total_nodes, "total_relationships": total_relationships}
     except Exception as e:
-        logger.error(f"Error verifying index: {e}")
-        raise HTTPException(status_code=500, detail=f"Error verifying index: {e}")
+        logger.error(f"Error verifying Neo4j index: {e}")
+        raise HTTPException(status_code=500, detail="Error verifying index.")
+
 
 @app.post("/retrieve_documents/")
-async def retrieve_documents(request: RetrievalQuery):
-    # Perform the similarity search
-    results = vectorstore.similarity_search(request.query, k=request.top_k)
-    
-    # Format and return results
-    return {"results": [{"content": doc.page_content, "metadata": doc.metadata} for doc in results]}
+async def retrieve_documents(query: str, top_k: int = Query(default=5)):
+    """
+    Retrieve documents from the vector store using a query.
+    """
+    try:
+        results = vectorstore.similarity_search(query, k=top_k)
+        return {"results": [{"content": doc.page_content, "metadata": doc.metadata} for doc in results]}
+    except Exception as e:
+        logger.error(f"Error retrieving documents: {e}")
+        raise HTTPException(status_code=500, detail="Error retrieving documents.")
 
-@app.post("/search/")
-def hybrid_search(query: str):
-    store = Neo4jVector.from_existing_index(
-        embeddings=ollama_emb,
-        url=URI,
-        username=USER,
-        password=PASSWORD,
-        index_name="vector_index",
-        keyword_index_name="keyword",
-        search_type="hybrid",
-    )
-    retriever = store.as_retriever()
-    results = retriever.invoke(query)
-    return {"results": results}
 
-@app.post("/log_models/")
-def log_models():
-    """API endpoint to trigger logging of model details."""
-    return model_logger_service.log_model_details()
-
-@app.post("/log_queries/")
-def log_queries(query: str):
-    """API endpoint to trigger logging of queries."""
-    return model_logger_service.log_query(query)
-
-# Metrics endpoint for Prometheus
 @app.get("/metrics")
 async def metrics():
+    """
+    Endpoint to expose metrics for Prometheus.
+    """
     from prometheus_client import generate_latest, CONTENT_TYPE_LATEST
     return Response(generate_latest(), media_type=CONTENT_TYPE_LATEST)

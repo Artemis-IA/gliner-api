@@ -348,6 +348,13 @@ labels:
   - "Diplomatic Attachés"
 
   # Time Elements
+  - "Date"
+  - "Time"
+  - "Month"
+  - "Year"
+  - "Week"
+  - "Day"
+  - "Hour"
   - "Fiscal Year"
   - "Quarter"
   - "Annual Report"
