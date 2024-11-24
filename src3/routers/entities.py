@@ -1,3 +1,4 @@
+# routers/entities.py
 from fastapi import APIRouter, HTTPException
 from typing import List
 from loguru import logger

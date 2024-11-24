@@ -1,88 +1,167 @@
 from neo4j import GraphDatabase, Transaction
 from loguru import logger
-from typing import Dict, Any, Optional
+from typing import List, Dict, Any, Optional
+
 
 class Neo4jService:
     def __init__(self, uri: str, user: str, password: str):
+        """
+        Initialize the connection to the Neo4j database.
+        
+        Args:
+            uri (str): URI of the Neo4j database.
+            user (str): Username for authentication.
+            password (str): Password for authentication.
+        """
         self.driver = GraphDatabase.driver(uri, auth=(user, password))
         logger.info(f"Connected to Neo4j at {uri}")
 
     def close(self):
+        """Close the connection to the Neo4j database."""
         if self.driver:
             self.driver.close()
             logger.info("Neo4j connection closed.")
 
-    def create_node(self, label: str, properties: Dict[str, Any]) -> Optional[int]:
-        with self.driver.session() as session:
-            result = session.write_transaction(self._create_node_transaction, label, properties)
-            return result
-
-    @staticmethod
-    def _create_node_transaction(tx: Transaction, label: str, properties: Dict[str, Any]) -> Optional[int]:
-        query = f"""
-        CREATE (n:{label} $properties)
-        RETURN id(n) AS node_id
+    def index_graph(self, nodes: List[Dict[str, Any]], edges: List[Dict[str, Any]]):
         """
-        try:
-            result = tx.run(query, properties=properties)
-            node_id = result.single()["node_id"]
-            logger.info(f"Node created with ID: {node_id}")
-            return node_id
-        except Exception as e:
-            logger.error(f"Failed to create node: {e}")
-            return None
-
-    def create_relationship(self, source_id: int, target_id: int, relationship_type: str, properties: Dict[str, Any] = None) -> bool:
-        with self.driver.session() as session:
-            success = session.write_transaction(self._create_relationship_transaction, source_id, target_id, relationship_type, properties)
-            return success
-
-    @staticmethod
-    def _create_relationship_transaction(tx: Transaction, source_id: int, target_id: int, relationship_type: str, properties: Dict[str, Any] = None) -> bool:
-        query = f"""
-        MATCH (a), (b)
-        WHERE id(a) = $source_id AND id(b) = $target_id
-        CREATE (a)-[r:{relationship_type} $properties]->(b)
-        RETURN r
+        Index nodes and edges into the Neo4j database.
         """
-        try:
-            result = tx.run(query, source_id=source_id, target_id=target_id, properties=properties or {})
-            if result.single():
-                logger.info(f"Relationship {relationship_type} created between nodes {source_id} and {target_id}")
-                return True
-            else:
-                logger.error("Failed to create relationship: No result returned")
-                return False
-        except Exception as e:
-            logger.error(f"Failed to create relationship: {e}")
-            return False
-
-    def get_node(self, node_id: int) -> Optional[Dict[str, Any]]:
         with self.driver.session() as session:
-            node = session.read_transaction(self._get_node_transaction, node_id)
-            return node
+            if nodes:
+                session.write_transaction(self._index_nodes, nodes)
+            if edges:
+                session.write_transaction(self._index_edges, edges)
 
     @staticmethod
-    def _get_node_transaction(tx: Transaction, node_id: int) -> Optional[Dict[str, Any]]:
+    def _index_nodes(tx: Transaction, nodes: List[Dict[str, Any]]):
+        """
+        Helper function to index nodes into Neo4j.
+
+        Args:
+            tx (Transaction): Neo4j transaction object.
+            nodes (List[Dict[str, Any]]): List of nodes to index.
+        """
+        for node in nodes:
+            try:
+                query = """
+                MERGE (n {id: $id})
+                ON CREATE SET n += $properties
+                """
+                tx.run(query, id=node["id"], properties=node.get("properties", {}))
+                logger.info(f"Node {node['id']} indexed successfully.")
+            except Exception as e:
+                logger.error(f"Failed to index node {node['id']}: {e}")
+
+    @staticmethod
+    def _index_edges(tx: Transaction, edges: List[Dict[str, Any]]):
+        """
+        Helper function to index relationships into Neo4j.
+
+        Args:
+            tx (Transaction): Neo4j transaction object.
+            edges (List[Dict[str, Any]]): List of relationships to index.
+        """
+        for edge in edges:
+            try:
+                query = """
+                MATCH (a {id: $source}), (b {id: $target})
+                MERGE (a)-[r:$type]->(b)
+                SET r += $properties
+                """
+                tx.run(
+                    query,
+                    source=edge["source"],
+                    target=edge["target"],
+                    type=edge["type"],
+                    properties=edge.get("properties", {}),
+                )
+                logger.info(f"Edge from {edge['source']} to {edge['target']} indexed successfully.")
+            except Exception as e:
+                logger.error(f"Failed to index edge from {edge['source']} to {edge['target']}: {e}")
+
+    def get_all_entities(self) -> List[Dict[str, Any]]:
+        """
+        Retrieve all nodes from the Neo4j database.
+
+        Returns:
+            List[Dict[str, Any]]: List of all nodes with their properties.
+        """
+        with self.driver.session() as session:
+            return session.read_transaction(self._get_all_entities_transaction)
+
+    @staticmethod
+    def _get_all_entities_transaction(tx: Transaction) -> List[Dict[str, Any]]:
+        """
+        Helper function to retrieve all nodes.
+
+        Args:
+            tx (Transaction): Neo4j transaction object.
+
+        Returns:
+            List[Dict[str, Any]]: List of all nodes.
+        """
         query = """
-        MATCH (n)
-        WHERE id(n) = $node_id
-        RETURN properties(n) AS properties
+        MATCH (e)
+        RETURN id(e) AS id, labels(e) AS labels, properties(e) AS properties
         """
         try:
-            result = tx.run(query, node_id=node_id)
-            record = result.single()
-            if record:
-                logger.info(f"Node retrieved with ID: {node_id}")
-                return record["properties"]
-            else:
-                logger.error(f"Node with ID {node_id} not found")
-                return None
+            result = tx.run(query)
+            entities = [{"id": record["id"], "labels": record["labels"], "properties": record["properties"]} for record in result]
+            return entities
         except Exception as e:
-            logger.error(f"Failed to retrieve node: {e}")
-            return None
+            logger.error(f"Failed to retrieve entities: {e}")
+            return []
 
-    def execute_query(self, query: str, parameters: Dict[str, Any] = None) -> Any:
+    def get_all_relationships(self) -> List[Dict[str, Any]]:
+        """
+        Retrieve all relationships from the Neo4j database.
+
+        Returns:
+            List[Dict[str, Any]]: List of all relationships with their properties.
+        """
         with self.driver.session() as session:
-            result = session.run(query, **(parameters or {}))
-            return result.data()
+            return session.read_transaction(self._get_all_relationships_transaction)
+
+    @staticmethod
+    def _get_all_relationships_transaction(tx: Transaction) -> List[Dict[str, Any]]:
+        """
+        Helper function to retrieve all relationships.
+
+        Args:
+            tx (Transaction): Neo4j transaction object.
+
+        Returns:
+            List[Dict[str, Any]]: List of all relationships.
+        """
+        query = """
+        MATCH ()-[r]->()
+        RETURN id(r) AS id, type(r) AS type, startNode(r) AS source, endNode(r) AS target, properties(r) AS properties
+        """
+        try:
+            result = tx.run(query)
+            relationships = [
+                {
+                    "id": record["id"],
+                    "type": record["type"],
+                    "source": record["source"],
+                    "target": record["target"],
+                    "properties": record["properties"],
+                }
+                for record in result
+            ]
+            return relationships
+        except Exception as e:
+            logger.error(f"Failed to retrieve relationships: {e}")
+            return []
+
+    def generate_graph_visualization(self) -> dict:
+        """
+        Generate a visualization of the graph by retrieving all nodes and relationships.
+
+        Returns:
+            dict: Dictionary containing nodes and relationships.
+        """
+        with self.driver.session() as session:
+            nodes = session.read_transaction(self._get_all_entities_transaction)
+            relationships = session.read_transaction(self._get_all_relationships_transaction)
+            return {"nodes": nodes, "relationships": relationships}

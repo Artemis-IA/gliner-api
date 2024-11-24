@@ -1,6 +1,7 @@
+# routers/graph.py
 from fastapi import APIRouter, HTTPException
 from loguru import logger
-from typing import List
+from typing import List, Dict, Any
 
 from services.neo4j_service import Neo4jService
 from dependencies import get_neo4j_service
@@ -9,10 +10,10 @@ from models.pydantic.relationship import Relationship
 
 router = APIRouter()
 
-# Dependency injection
 neo4j_service: Neo4jService = get_neo4j_service()
 
-@router.get("/graph/entities/", response_model=List[Entity])
+
+@router.get("/entities/", response_model=List[Entity])
 async def get_all_entities():
     logger.info("Retrieving all entities from the graph")
     try:
@@ -23,7 +24,8 @@ async def get_all_entities():
         logger.error(f"Error retrieving entities: {e}")
         raise HTTPException(status_code=500, detail=str(e))
 
-@router.get("/graph/relationships/", response_model=List[Relationship])
+
+@router.get("/relationships/", response_model=List[Relationship])
 async def get_all_relationships():
     logger.info("Retrieving all relationships from the graph")
     try:
@@ -34,7 +36,8 @@ async def get_all_relationships():
         logger.error(f"Error retrieving relationships: {e}")
         raise HTTPException(status_code=500, detail=str(e))
 
-@router.get("/graph/visualize/", response_model=dict)
+
+@router.get("/visualize/", response_model=Dict[str, List[Dict[str, Any]]])
 async def visualize_graph():
     logger.info("Generating graph visualization data")
     try:

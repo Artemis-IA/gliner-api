@@ -90,7 +90,7 @@ ollama_emb = OllamaEmbeddings(model="nomic-embed-text")
 llm = ChatOllama(model="llama3.2")
 
 # Load GLiNER configuration
-with open('gli_config.yml', 'r') as file:
+with open('conf/gli_config.yml', 'r') as file:
     config = yaml.safe_load(file)
 
 gliner_extractor = GLiNERLinkExtractor(
@@ -101,8 +101,8 @@ gliner_extractor = GLiNERLinkExtractor(
 graph_transformer = GlinerGraphTransformer(
     allowed_nodes=config["allowed_nodes"],
     allowed_relationships=config["allowed_relationships"],
-    gliner_model="urchade/gliner_mediumv2.1",
-    glirel_model="jackboyla/glirel_beta",
+    gliner_model="knowledgator/gliner-multitask-large-v0.5",
+    glirel_model="jackboyla/glirel-large-v0",
     entity_confidence_threshold=0.1,
     relationship_confidence_threshold=0.1,
 )

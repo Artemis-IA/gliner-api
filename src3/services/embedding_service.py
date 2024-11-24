@@ -1,3 +1,4 @@
+# services/embedding_service.py
 from langchain_ollama.embeddings import OllamaEmbeddings
 from loguru import logger
 from typing import List
@@ -24,3 +25,9 @@ class EmbeddingService:
         except Exception as e:
             logger.error(f"Failed to generate embedding: {e}")
             return []
+
+    def embed_documents(self, texts):
+        return self.embedding_model.embed_documents(texts)
+
+    def embed_query(self, text):
+        return self.embedding_model.embed_query(text)

@@ -1,30 +1,161 @@
 
 # config.py
 #-----
-from pydantic import BaseSettings
+import os
+from pathlib import Path
+from pydantic_settings import BaseSettings
+import torch
+
 
 class Settings(BaseSettings):
+    # Application settings
     HOST: str = "0.0.0.0"
     PORT: int = 8000
-    NEO4J_URI: str = "bolt://localhost:7687"
+
+    # Proxy settings
+    USE_ET_PROXY: bool = False
+    HTTP_PROXY: str = ""
+    HTTPS_PROXY: str = ""
+    NO_PROXY: str = ""
+
+    # Neo4j settings
+    NEO4J_URI: str = "bolt://neo4j:7687"
     NEO4J_USER: str = "neo4j"
     NEO4J_PASSWORD: str = "your_password"
-    MINIO_URL: str = "http://localhost:9000"
+
+    # PostgreSQL settings
+    PG_MAJOR: int = 16
+    POSTGRE_PORT: int = 5432
+    POSTGRE_USER: str = "postgre_user"
+    POSTGRE_PASSWORD: str = "postgre_password"
+    POSTGRE_DB: str = "postgre_db"
+    POSTGRE_HOST: str = "localhost"
+    DJANGO_DB: str = "default"
+
+    # Derived PostgreSQL settings
+    DATABASE_URL: str = "postgresql://postgre_user:postgre_password@localhost:5432/postgre_db"
+
+    # MLflow settings
+    MLFLOW_USER: str = "mlflow_user"
+    MLFLOW_PASSWORD: str = "mlflow_password"
+    MLFLOW_DB: str = "mlflow_db"
+    MLFLOW_PORT: int = 5002
+    MLFLOW_TRACKING_URI: str = "http://mlflow:5002"
+    MLFLOW_S3_ENDPOINT_URL: str = "http://minio:9000"
+    MLFLOW_S3_IGNORE_TLS: bool = True
+
+    # Derived MLflow settings
+    MLFLOW_BACKEND_STORE_URI: str = "postgresql+psycopg2://postgre_user:postgre_password@localhost:5432/mlflow_db"
+    MLFLOW_ARTIFACT_ROOT: str = "s3://minio:minio123@http://minio:9000/mlflow"
+
+    # MinIO settings
+    MINIO_PORT: int = 9000
+    MINIO_CONSOLE_PORT: int = 9001
+    MINIO_CLIENT_PORT: int = 9002
     MINIO_ACCESS_KEY: str = "minio"
     MINIO_SECRET_KEY: str = "minio123"
-    POSTGRES_USER: str = "postgres_user"
-    POSTGRES_PASSWORD: str = "postgres_password"
-    POSTGRES_HOST: str = "localhost"
-    POSTGRES_DB: str = "postgres_db"
-    DATABASE_URL: str = f"postgresql://{POSTGRES_USER}:{POSTGRES_PASSWORD}@{POSTGRES_HOST}/{POSTGRES_DB}"
-    MLFLOW_TRACKING_URI: str = DATABASE_URL
-    MLFLOW_ARTIFACT_URI: str = f"s3://{MINIO_ACCESS_KEY}:{MINIO_SECRET_KEY}@{MINIO_URL}/mlflow"
-    ALLOWED_ORIGINS: list = ["*"]
+    MINIO_ROOT_USER: str = "minio"
+    MINIO_ROOT_PASSWORD: str = "minio123"
+    MINIO_API_URL: str = "http://minio:9000"
+    MINIO_URL: str = "http://minio:9000"
 
+    # AWS settings for MinIO compatibility
+    AWS_ACCESS_KEY_ID: str = "minio"
+    AWS_SECRET_ACCESS_KEY: str = "minio123"
+    AWS_DEFAULT_REGION: str = "eu-west-1"
+
+    # Label Studio settings
+    LABEL_STUDIO_USER: str = "labelstudio_user"
+    LABEL_STUDIO_PASSWORD: str = "labelstudio_password"
+    LABEL_STUDIO_DB: str = "labelstudio_db"
+    LABEL_STUDIO_HOST: str = "label-studio"
+    LABEL_STUDIO_PORT: int = 8081
+    LABEL_STUDIO_USERNAME: str = "admin_user"
+    LABEL_STUDIO_EMAIL: str = "admin@example.com"
+    LABEL_STUDIO_API_KEY: str = "secure_api_key_123"
+    LABEL_STUDIO_BUCKET_NAME: str = "mlflow-source"
+    LABEL_STUDIO_BUCKET_PREFIX: str = "source_data/"
+    LABEL_STUDIO_BUCKET_ENDPOINT_URL: str = "http://minio:9000"
+    LABEL_STUDIO_BUCKET_ACCESS_KEY: str = "minio"
+    LABEL_STUDIO_BUCKET_SECRET_KEY: str = "minio123"
+    LABEL_STUDIO_TARGET_BUCKET: str = "mlflow-annotations"
+    LABEL_STUDIO_TARGET_PREFIX: str = "annotations/"
+    LABEL_STUDIO_TARGET_ACCESS_KEY: str = "minio"
+    LABEL_STUDIO_TARGET_SECRET_KEY: str = "minio123"
+    LABEL_STUDIO_TARGET_ENDPOINT_URL: str = "http://minio:9000"
+    LABEL_STUDIO_PROJECT_NAME: str = "proj-1"
+    LABEL_STUDIO_PROJECT_TITLE: str = "Machine Learning Annotations Project"
+    LABEL_STUDIO_LOCAL_FILES_SERVING_ENABLED: bool = True
+    LS_DATABASE_URL: str = "postgresql://labelstudio_user:labelstudio_password@localhost:5432/labelstudio_db"
+
+    # Prometheus settings
+    PROMETHEUS_PORT: int = 9090
+
+    # GLiNER settings
+    GLINER_BASIC_AUTH_USER: str = "my_user"
+    GLINER_BASIC_AUTH_PASS: str = "my_password"
+    GLINER_MODEL_NAME: str = "knowledgator/gliner-multitask-large-v0.5"
+    LABEL_STUDIO_ML_BACKENDS: str = '[{"url": "http://gliner:9097", "name": "GLiNER"}]'
+
+    GLIREL_MODEL_NAME: str = "jackboyla/glirel-large-v0"
+    # Secret Key
+    SECRET_KEY: str = "super_secret_key_123"
+
+    # General settings
+    WORKERS: int = 4
+    THREADS: int = 4
+    TEST_ENV: str = "my_test_env"
+    LOCIP: str = "192.168.1.106"
+
+    # ML Backend
+    MLBACKEND_PORT: int = 9097
+
+    # Default Models
+    DEFAULT_MODELS: str = "urchade/gliner_smallv2.1"
+
+    # Training Configuration
+    TRAIN_CONFIG: dict = {
+        "num_steps": 10_000,
+        "train_batch_size": 2,
+        "eval_every": 1_000,
+        "save_directory": "checkpoints",
+        "warmup_ratio": 0.1,
+        "device": "cuda" if torch.cuda.is_available() else "cpu",
+        "lr_encoder": 1e-5,
+        "lr_others": 5e-5,
+        "freeze_token_rep": False,
+        "max_types": 25,
+        "shuffle_types": True,
+        "random_drop": True,
+        "max_neg_type_ratio": 1,
+        "max_len": 384,
+    }
+
+    # Text splitting settings
+    TEXT_CHUNK_SIZE: int = 1000
+    TEXT_CHUNK_OVERLAP: int = 200
+    CONF_FILE: str = "../conf/gli_config.yml"
+    
+
+    # Ollama
+    OLLAMA_MODEL: str ="nomic-embed-text"
     class Config:
-        env_file = ".env"
+        env_file = Path(__file__).resolve().parents[2] / ".env"
+        env_file_encoding = "utf-8"
+        extra = "allow"
 
+
+# Instanciation de la configuration
 settings = Settings()
+
+# Constants for Models and Device
+MODELS = {
+    "GLiNER-S": "urchade/gliner_smallv2.1",
+    "GLiNER-M": "urchade/gliner_mediumv2.1",
+    "GLiNER-L": "urchade/gliner_largev2.1",
+}
+
+DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 #-----
 
 # __init__.py
@@ -95,21 +226,152 @@ if __name__ == "__main__":
 
 # dependencies.py
 #-----
+# dependencies.py
+
+import yaml
 from fastapi import Depends
 from sqlalchemy.orm import Session
+from typing import Generator
+
+from config import settings
 from utils.database import SessionLocal
+from services.s3_service import S3Service
+from services.mlflow_service import MLFlowService
+from services.document_processor import DocumentProcessor
+from services.pgvector_service import PGVectorService
+from services.neo4j_service import Neo4jService
+from services.rag_service import RAGChainService
+from services.embedding_service import EmbeddingService
+from langchain_text_splitters import RecursiveCharacterTextSplitter
+from langchain_experimental.graph_transformers.gliner import GlinerGraphTransformer
+from langchain_community.graph_vectorstores.extractors import GLiNERLinkExtractor
+from langchain_postgres import PGVector
+from langchain_ollama.embeddings import OllamaEmbeddings
+from neo4j import GraphDatabase
 
 # Dependency to get the SQLAlchemy session
-def get_db() -> Session:
+def get_db() -> Generator[Session, None, None]:
+    """Yields a database session."""
     db = SessionLocal()
     try:
         yield db
     finally:
         db.close()
 
-# Example of other shared dependencies
-async def common_parameters(skip: int = 0, limit: int = 10):
-    return {"skip": skip, "limit": limit}
+# Dependency to get the S3 service
+def get_s3_service() -> S3Service:
+    """Returns an instance of the S3 service."""
+    return S3Service(
+        s3_client=None,
+        endpoint_url=settings.MINIO_URL,
+        access_key=settings.MINIO_ACCESS_KEY,
+        secret_key=settings.MINIO_SECRET_KEY,
+        input_bucket="docs-input",
+        output_bucket="docs-output",
+        layouts_bucket="layouts"
+    )
+
+# Dependency to get the MLflow service
+def get_mlflow_service() -> MLFlowService:
+    """Returns an instance of the MLflow service."""
+    return MLFlowService(tracking_uri=settings.MLFLOW_TRACKING_URI)
+
+# Dependency for PGVector service
+def get_pgvector_service() -> PGVectorService:
+    return PGVectorService(
+        db_url=settings.DATABASE_URL,
+        table_name="document_embeddings"
+    )
+
+
+# Dependency for embedding service
+def get_embedding_service() -> EmbeddingService:
+    return EmbeddingService(model_name=settings.OLLAMA_MODEL)
+
+
+# Dependency for PGVector vector store
+def get_pgvector_vector_store() -> PGVector:
+    embedding_service = get_embedding_service()
+    return PGVector(
+        collection_name="document_embeddings",
+        connection=settings.DATABASE_URL,
+        embeddings=embedding_service.embedding_model.embed_documents
+    )
+
+# Dependency to get the Neo4j driver
+def get_neo4j_driver() -> GraphDatabase:
+    """Returns a Neo4j driver instance."""
+    return GraphDatabase.driver(
+        settings.NEO4J_URI,
+        auth=(settings.NEO4J_USER, settings.NEO4J_PASSWORD)
+    )
+
+# Dependency to get the Neo4j service
+def get_neo4j_service() -> Neo4jService:
+    """Returns an instance of the Neo4j service."""
+    return Neo4jService(
+        uri=settings.NEO4J_URI,
+        user=settings.NEO4J_USER,
+        password=settings.NEO4J_PASSWORD
+    )
+
+# Initialize reusable text splitter
+def get_text_splitter() -> RecursiveCharacterTextSplitter:
+    """Returns an instance of the text splitter."""
+    return RecursiveCharacterTextSplitter(
+        chunk_size=settings.TEXT_CHUNK_SIZE,
+        chunk_overlap=settings.TEXT_CHUNK_OVERLAP
+    )
+
+# Dependency to get the GLiNER extractor
+def get_gliner_extractor() -> GLiNERLinkExtractor:
+    """Returns an instance of the GLiNER extractor."""
+    with open(settings.CONF_FILE, 'r') as file:
+        config = yaml.safe_load(file)
+    return GLiNERLinkExtractor(
+        labels=config["labels"],
+        model=settings.GLINER_MODEL
+    )
+
+# Dependency to get the graph transformer
+def get_graph_transformer() -> GlinerGraphTransformer:
+    """Returns an instance of the GlinerGraphTransformer."""
+    with open(settings.CONF_FILE, 'r') as file:
+        config = yaml.safe_load(file)
+    return GlinerGraphTransformer(
+        allowed_nodes=config["allowed_nodes"],
+        allowed_relationships=config["allowed_relationships"],
+        gliner_model=settings.GLINER_MODEL_NAME,
+        glirel_model=settings.GLIREL_MODEL_NAME,
+        entity_confidence_threshold=0.1,
+        relationship_confidence_threshold=0.1,
+    )
+
+# Dependency to get the document processor
+def get_document_processor(db: Session = Depends(get_db)) -> DocumentProcessor:
+    """Returns an instance of the Document Processor."""
+    s3_service = get_s3_service()
+    mlflow_service = get_mlflow_service()
+    pgvector_service = get_pgvector_service()
+    text_splitter = get_text_splitter()
+    graph_transformer = get_graph_transformer()
+    neo4j_service = get_neo4j_service()
+
+    return DocumentProcessor(
+        s3_service=s3_service,
+        mlflow_service=mlflow_service,
+        pgvector_service=pgvector_service,
+        neo4j_service=neo4j_service,
+        session=db,
+        text_splitter=text_splitter,
+        graph_transformer=graph_transformer
+    )
+
+# Dependency to get the RAG service
+def get_rag_service() -> RAGChainService:
+    """Returns an instance of the RAG Chain Service."""
+    vector_store = get_pgvector_vector_store()
+    return RAGChainService(retriever=vector_store.as_retriever())
 
 #-----
 
@@ -225,8 +487,76 @@ def get_env_variable(key: str, default: Optional[str] = None) -> str:
 
 #-----
 
-# utils/logging.py
+# utils/metrics.py
 #-----
+import psutil, GPUtil
+from loguru import logger 
+from prometheus_client import Counter, Histogram, Gauge, start_http_server
+from codecarbon import EmissionsTracker
+
+# Metrics for Prometheus
+
+REQUEST_COUNT = Counter("app_request_count", "Nombre total de requêtes")
+PROCESS_TIME = Histogram("app_process_time_seconds", "Temps de traitement des requêtes")
+GPU_MEMORY_USAGE = Gauge("gpu_memory_usage_bytes", "Utilisation mémoire GPU")
+CPU_USAGE = Gauge("cpu_usage_percent", "Utilisation CPU")
+MEMORY_USAGE = Gauge("memory_usage_bytes", "Utilisation mémoire RAM")
+CARBON_EMISSIONS = Gauge("carbon_emissions_grams", "Émissions CO2 estimées")
+MODEL_LOG_COUNT = Counter("model_log_count", "Nombre de modèles enregistrés dans MLflow")
+NEO4J_REQUEST_COUNT = Counter("neo4j_request_count", "Number of requests sent to Neo4j")
+NEO4J_REQUEST_FAILURES = Counter("neo4j_request_failures", "Number of failed Neo4j requests")
+NEO4J_REQUEST_LATENCY = Histogram("neo4j_request_latency_seconds", "Latency of Neo4j requests")
+
+POSTGRES_QUERY_COUNT = Counter("postgres_query_count", "Number of successful PostgreSQL queries")
+POSTGRES_QUERY_FAILURES = Counter("postgres_query_failures", "Number of failed PostgreSQL queries")
+POSTGRES_QUERY_LATENCY = Histogram("postgres_query_latency_seconds", "Latency of PostgreSQL queries")
+
+DOCUMENT_PROCESSING_SUCCESS = Counter("document_processing_success", "Number of successfully processed documents")
+DOCUMENT_PROCESSING_FAILURES = Counter("document_processing_failures", "Number of failed document processing attempts")
+
+emissions_tracker = EmissionsTracker(project_name="doc_processing", save_to_file=False, save_to_prometheus=True, prometheus_url="localhost:8002")
+
+# Function to start the Prometheus metrics server
+def start_metrics_server(port: int = 8002):
+    """
+    Start the Prometheus metrics server to expose application metrics.
+
+    Args:
+        port (int): The port to expose metrics on (default is 8002).
+    """
+    start_http_server(port)
+    REQUEST_COUNT.inc()  # Increment the request count to indicate the server has started
+
+def log_system_metrics():
+    """
+    Log et exposition des métriques système (CPU, RAM, GPU et émissions de CO₂).
+    """
+    try:
+        CPU_USAGE.set(psutil.cpu_percent())
+        MEMORY_USAGE.set(psutil.virtual_memory().used)
+
+        # GPU metrics
+        gpus = GPUtil.getGPUs()
+        if gpus:
+            GPU_MEMORY_USAGE.set(gpus[0].memoryUsed)  # Seulement la première GPU
+
+        # CodeCarbon emissions
+        global emissions_tracker
+        if emissions_tracker:
+            emissions_tracker.start()
+            emissions = emissions_tracker.stop()
+            if emissions is not None:
+                CARBON_EMISSIONS.set(emissions)
+                logger.info(f"Émissions collectées : {emissions:.6f} kgCO₂eq")
+            else:
+                logger.warning("Aucune donnée d'émissions collectée (None).")
+    except Exception as e:
+        logger.warning(f"Erreur lors de la collecte des métriques : {e}")
+#-----
+
+# utils/logging_utils.py
+#-----
+
 # utils/logging.py
 import os
 from loguru import logger
@@ -236,22 +566,41 @@ from mlflow.tracking import MlflowClient
 from codecarbon import EmissionsTracker
 from typing import Optional
 import time
-from utils.config import DATABASE_URL
-
-
 
 class ModelLoggerService:
-    def __init__(self, db_url: str):
-        mlflow.set_tracking_uri(db_url)
-        self.client = MlflowClient()
+    def __init__(self):
         self.hf_api = HfApi()  # Initialize the Hugging Face API client
         self.huggingface_cache = os.path.expanduser("~/.cache/huggingface/hub/")
+        self.client = MlflowClient()
+        self.emissions_tracker = None
+
+        # Initialize the MLflow tracking URI
+        db_url = os.getenv("DATABASE_URL", "sqlite:///mlflow.db")
+        mlflow.set_tracking_uri(db_url)
+
+        # Initialize static models and CodeCarbon tracker
         self.static_models = {
             "Ollama Embedding Model": ("sentence-transformers/all-MiniLM-L6-v2", os.path.join(self.huggingface_cache, "models--sentence-transformers--all-MiniLM-L6-v2")),
             "GLiNER Extractor Model": ("E3-JSI/gliner-multi-pii-domains-v1", os.path.join(self.huggingface_cache, "models--E3-JSI--gliner-multi-pii-domains-v1")),
             "Gliner Transformer Model": ("knowledgator/gliner-multitask-large-v0.5", os.path.join(self.huggingface_cache, "models--knowledgator--gliner-multitask-large-v0.5")),
             "Tokenizer Model": ("microsoft/deberta-v3-large", os.path.join(self.huggingface_cache, "models--microsoft--deberta-v3-large"))
         }
+        self.initialize_emissions_tracker()
+
+    def initialize_emissions_tracker(self):
+        """
+        Initialize CodeCarbon tracker with lock file cleanup.
+        """
+        lock_file = "/tmp/.codecarbon.lock"
+        if os.path.exists(lock_file):
+            try:
+                os.remove(lock_file)
+                logger.info("CodeCarbon lock file removed.")
+            except Exception as e:
+                logger.warning(f"Unable to remove CodeCarbon lock file: {e}")
+
+        self.emissions_tracker = EmissionsTracker(project_name="model_logging", save_to_file=False, save_to_prometheus=True, prometheus_url="localhost:8002")
+        logger.info("CodeCarbon tracker initialized.")
 
     def log_model_details(self):
         logger.info("Starting model logging process...")
@@ -314,7 +663,7 @@ class ModelLoggerService:
         except Exception as e:
             logger.warning(f"Unable to fetch README.md for model {model_id}: {e}")
             return None
-        
+
     def log_query(self, query: str):
         try:
             with mlflow.start_run(run_name="Query Logging") as run:
@@ -326,48 +675,101 @@ class ModelLoggerService:
             logger.error(f"Error logging query: {e}")
             return {"error": str(e)}
 
-model_logger_service = ModelLoggerService(db_url=DATABASE_URL)
-
 #-----
 
-# utils/metrics.py
+# utils/database.py
 #-----
-from prometheus_client import Counter, Histogram, Gauge, start_http_server
+from sqlalchemy import create_engine
+from sqlalchemy.ext.declarative import declarative_base
+from sqlalchemy.orm import sessionmaker
+from contextlib import contextmanager
+from config import settings
+import logging
 
-# Metrics for Prometheus
-REQUEST_COUNT = Counter("app_request_count", "Total number of requests received")
-REQUEST_LATENCY = Histogram("app_request_latency_seconds", "Latency of requests in seconds")
-CPU_USAGE = Gauge("app_cpu_usage_percent", "CPU usage in percent")
-MEMORY_USAGE = Gauge("app_memory_usage_bytes", "Memory usage in bytes")
-GPU_MEMORY_USAGE = Gauge("app_gpu_memory_usage_bytes", "GPU memory usage in bytes")
-CARBON_EMISSIONS = Gauge("app_carbon_emissions_grams", "Estimated carbon emissions in grams")
+# Load database URL from settings
+db_url = settings.DATABASE_URL
 
-# Function to start the Prometheus metrics server
-def start_metrics_server(port: int = 8002):
-    """
-    Start the Prometheus metrics server to expose application metrics.
+# Create the SQLAlchemy engine
+engine = create_engine(db_url, echo=True)
 
-    Args:
-        port (int): The port to expose metrics on (default is 8002).
-    """
-    start_http_server(port)
-    REQUEST_COUNT.inc()  # Increment the request count to indicate the server has started
+# Create a configured "Session" class
+SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
+
+# Create a base class for the models
+Base = declarative_base()
+
+# Set up logging
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger(__name__)
+
+# Dependency to get the SQLAlchemy session
+def get_db():
+    db = SessionLocal()
+    try:
+        yield db
+    except Exception as e:
+        logger.error(f"Database session error: {e}")
+        raise
+    finally:
+        db.close()
+
+# Context manager for database sessions
+@contextmanager
+def db_session():
+    db = SessionLocal()
+    try:
+        yield db
+    except Exception as e:
+        logger.error(f"Database session error: {e}")
+        raise
+    finally:
+        db.close()
+
+# Create all tables
+def init_db():
+    from sqlalchemy import text  # To execute raw SQL if needed
+    Base.metadata.create_all(bind=engine)
+    logger.info("Database tables created successfully.")
 
 #-----
 
 # models/pydantic/entity.py
 #-----
-from pydantic import BaseModel
-from typing import Dict, Any
+from pydantic import BaseModel, Field
+from typing import Dict, Any, Optional
 
-class Entity(BaseModel):
-    id: str
+class EntityBase(BaseModel):
     name: str
     type: str
-    properties: Dict[str, Any]
+    properties: Optional[Dict[str, Any]] = Field(default_factory=dict)
 
     class Config:
-        schema_extra = {
+        json_schema_extra = {
+            "example": {
+                "name": "Sample Entity",
+                "type": "Organization",
+                "properties": {
+                    "location": "New York",
+                    "employees": 100
+                }
+            }
+        }
+
+class EntityCreate(EntityBase):
+    """
+    Model for creating a new entity.
+    Inherits from EntityBase and can be extended for additional fields required at creation.
+    """
+    pass
+
+class Entity(EntityBase):
+    """
+    Model representing an entity with an ID, as returned from the database or API.
+    """
+    id: str = Field(..., description="The unique identifier of the entity")
+
+    class Config:
+        json_schema_extra = {
             "example": {
                 "id": "123e4567-e89b-12d3-a456-426614174001",
                 "name": "Sample Entity",
@@ -383,18 +785,45 @@ class Entity(BaseModel):
 
 # models/pydantic/relationship.py
 #-----
-from pydantic import BaseModel
-from typing import Dict, Any
+from pydantic import BaseModel, Field
+from typing import Dict, Any, Optional
 
-class Relationship(BaseModel):
-    source_id: str
-    target_id: str
-    type: str
-    properties: Dict[str, Any]
+class RelationshipBase(BaseModel):
+    source_id: str = Field(..., description="The ID of the source entity")
+    target_id: str = Field(..., description="The ID of the target entity")
+    type: str = Field(..., description="The type of the relationship")
+    properties: Optional[Dict[str, Any]] = Field(default_factory=dict, description="Additional properties of the relationship")
 
     class Config:
-        schema_extra = {
+        json_schema_extra = {
             "example": {
+                "source_id": "123e4567-e89b-12d3-a456-426614174001",
+                "target_id": "789e4567-e89b-12d3-a456-426614174002",
+                "type": "Partnership",
+                "properties": {
+                    "since": "2021-01-01",
+                    "status": "active"
+                }
+            }
+        }
+
+class RelationshipCreate(RelationshipBase):
+    """
+    Model for creating a new relationship.
+    Inherits from RelationshipBase and can be extended for additional fields required at creation.
+    """
+    pass
+
+class Relationship(RelationshipBase):
+    """
+    Model representing a relationship with an ID, as returned from the database or API.
+    """
+    id: str = Field(..., description="The unique identifier of the relationship")
+
+    class Config:
+        json_schema_extra = {
+            "example": {
+                "id": "456e4567-e89b-12d3-a456-426614174003",
                 "source_id": "123e4567-e89b-12d3-a456-426614174001",
                 "target_id": "789e4567-e89b-12d3-a456-426614174002",
                 "type": "Partnership",
@@ -440,6 +869,9 @@ class Document(BaseModel):
 # models/sqlalchemy/document_log.py
 #-----
 from sqlalchemy import Column, String, Integer
+from sqlalchemy.orm import Session
+from sqlalchemy.exc import SQLAlchemyError
+from typing import Callable
 from sqlalchemy.ext.declarative import declarative_base
 
 Base = declarative_base()
@@ -453,6 +885,22 @@ class DocumentLog(Base):
 
     def __repr__(self):
         return f"<DocumentLog(id={self.id}, file_name='{self.file_name}', s3_url='{self.s3_url}')>"
+
+
+class DocumentLogService:
+    def __init__(self, session_factory: Callable[[], Session]):
+        self.session_factory = session_factory
+
+    def log_document(self, file_name: str, s3_url: str) -> None:
+        """Logs a document entry in the database."""
+        try:
+            with self.session_factory() as session:
+                log_entry = DocumentLog(file_name=file_name, s3_url=s3_url)
+                session.add(log_entry)
+                session.commit()
+        except SQLAlchemyError as e:
+            session.rollback()
+            raise RuntimeError(f"Failed to log document: {e}")
 
 #-----
 
@@ -498,6 +946,7 @@ class CustomMetricsMiddleware(BaseHTTPMiddleware):
 
 # routers/entities.py
 #-----
+# routers/entities.py
 from fastapi import APIRouter, HTTPException
 from typing import List
 from loguru import logger
@@ -563,9 +1012,10 @@ async def delete_entity(entity_id: str):
 
 # routers/graph.py
 #-----
+# routers/graph.py
 from fastapi import APIRouter, HTTPException
 from loguru import logger
-from typing import List
+from typing import List, Dict, Any
 
 from services.neo4j_service import Neo4jService
 from dependencies import get_neo4j_service
@@ -574,10 +1024,10 @@ from models.pydantic.relationship import Relationship
 
 router = APIRouter()
 
-# Dependency injection
 neo4j_service: Neo4jService = get_neo4j_service()
 
-@router.get("/graph/entities/", response_model=List[Entity])
+
+@router.get("/entities/", response_model=List[Entity])
 async def get_all_entities():
     logger.info("Retrieving all entities from the graph")
     try:
@@ -588,7 +1038,8 @@ async def get_all_entities():
         logger.error(f"Error retrieving entities: {e}")
         raise HTTPException(status_code=500, detail=str(e))
 
-@router.get("/graph/relationships/", response_model=List[Relationship])
+
+@router.get("/relationships/", response_model=List[Relationship])
 async def get_all_relationships():
     logger.info("Retrieving all relationships from the graph")
     try:
@@ -599,7 +1050,8 @@ async def get_all_relationships():
         logger.error(f"Error retrieving relationships: {e}")
         raise HTTPException(status_code=500, detail=str(e))
 
-@router.get("/graph/visualize/", response_model=dict)
+
+@router.get("/visualize/", response_model=Dict[str, List[Dict[str, Any]]])
 async def visualize_graph():
     logger.info("Generating graph visualization data")
     try:
@@ -614,6 +1066,7 @@ async def visualize_graph():
 
 # routers/relationships.py
 #-----
+# # routers/relationships.py
 from fastapi import APIRouter, HTTPException
 from typing import List
 from loguru import logger
@@ -677,11 +1130,11 @@ async def delete_relationship(relationship_id: str):
 
 #-----
 
-# routers/logging.py
+# routers/logging_router.py
 #-----
 # routers/logging.py
 from fastapi import APIRouter
-from services.logging import ModelLoggerService
+from utils.logging_utils import ModelLoggerService
 
 router = APIRouter()
 
@@ -701,22 +1154,22 @@ def log_queries(query: str):
 
 # routers/documents.py
 #-----
+# routers/documents.py
 from fastapi import APIRouter, HTTPException, UploadFile, File, Form
-from typing import List
 from pathlib import Path
+from typing import List
 from loguru import logger
 
 from services.document_processor import DocumentProcessor
-from services.s3_service import S3Service
-from services.mlflow_service import MLFlowService
-from dependencies import get_s3_service, get_document_processor, get_mlflow_service
+from services.rag_service import RAGChainService
+from dependencies import get_document_processor, get_rag_service
 
 router = APIRouter()
 
 # Dependency injection
-s3_service: S3Service = get_s3_service()
 document_processor: DocumentProcessor = get_document_processor()
-mlflow_service: MLFlowService = get_mlflow_service()
+rag_service: RAGChainService = get_rag_service()
+
 
 @router.post("/upload/")
 async def upload_files(
@@ -725,50 +1178,90 @@ async def upload_files(
     use_ocr: bool = Form(False),
     export_figures: bool = Form(True),
     export_tables: bool = Form(True),
-    enrich_figures: bool = Form(False)
+    enrich_figures: bool = Form(False),
 ):
+    """
+    Upload and process documents for storage and feature extraction.
+    """
     logger.info(f"Received {len(files)} files for upload")
     success_count, partial_success_count, failure_count = 0, 0, 0
 
     for file in files:
         temp_file = Path(f"/tmp/{file.filename}")
-        with temp_file.open("wb") as out_file:
+        async with temp_file.open("wb") as out_file:
             content = await file.read()
-            out_file.write(content)
+            await out_file.write(content)
 
-        input_s3_url = s3_service.upload_file(temp_file, s3_service.input_bucket)
-        document_processor.log_document(file.filename, input_s3_url)
-
-        result = await document_processor.process_document(temp_file, use_ocr, export_figures, export_tables, enrich_figures)
-        if result:
-            counts = document_processor.export_document(result, export_formats, export_figures, export_tables)
+        # Process and log the document
+        try:
+            result = document_processor.process_file(
+                temp_file, use_ocr, export_figures, export_tables, enrich_figures
+            )
+            counts = document_processor.export_document(
+                result, temp_file.parent, export_formats, export_figures, export_tables
+            )
             success_count += counts[0]
             partial_success_count += counts[1]
             failure_count += counts[2]
+        except Exception as e:
+            logger.error(f"Error processing document {file.filename}: {e}")
+            failure_count += 1
+        finally:
+            temp_file.unlink()
 
     return {
         "message": "Documents processed and stored successfully",
-        "uploaded_to": s3_service.output_bucket,
         "success_count": success_count,
         "partial_success_count": partial_success_count,
-        "failure_count": failure_count
+        "failure_count": failure_count,
     }
+
 
 @router.post("/index_document/")
 async def index_document(file: UploadFile = File(...)):
+    """
+    Index a single document by extracting entities and relationships.
+    """
     logger.info(f"Indexing document: {file.filename}")
     temp_file = Path(f"/tmp/{file.filename}")
-    with temp_file.open("wb") as out_file:
+
+    # Use aiofiles for asynchronous file writing
+    import aiofiles
+    async with aiofiles.open(temp_file, "wb") as out_file:
         content = await file.read()
-        out_file.write(content)
+        await out_file.write(content)
 
     try:
-        document_processor.index_document(temp_file)
+        document_processor(temp_file)
         logger.info(f"Successfully indexed document: {file.filename}")
         return {"message": f"Document {file.filename} indexed successfully."}
     except Exception as e:
         logger.error(f"Error indexing document {file.filename}: {e}")
         raise HTTPException(status_code=500, detail=f"Error indexing document: {e}")
+    finally:
+        temp_file.unlink()
+
+
+
+@router.post("/rag_process/")
+async def process_rag_document(file: UploadFile = File(...)):
+    """
+    Process a document for RAG, splitting it, embedding it, and storing it in the vector store.
+    """
+    logger.info(f"Processing document for RAG: {file.filename}")
+    temp_file = Path(f"/tmp/{file.filename}")
+
+    async with temp_file.open("wb") as out_file:
+        content = await file.read()
+        await out_file.write(content)
+
+    try:
+        result = rag_service.process_document_for_rag(temp_file)
+        logger.info(f"Document successfully processed for RAG: {file.filename}")
+        return {"message": "Document successfully processed for RAG.", "details": result}
+    except Exception as e:
+        logger.error(f"Error processing document for RAG: {file.filename}. Error: {e}")
+        raise HTTPException(status_code=500, detail=f"Error processing document for RAG: {e}")
     finally:
         temp_file.unlink()
 
@@ -818,7 +1311,8 @@ async def search_relationships(keyword: str = Query(..., description="Keyword to
 #-----
 from neo4j import GraphDatabase, Transaction
 from loguru import logger
-from typing import Dict, Any, Optional
+from typing import Dict, Any, Optional, List
+
 
 class Neo4jService:
     def __init__(self, uri: str, user: str, password: str):
@@ -832,8 +1326,7 @@ class Neo4jService:
 
     def create_node(self, label: str, properties: Dict[str, Any]) -> Optional[int]:
         with self.driver.session() as session:
-            result = session.write_transaction(self._create_node_transaction, label, properties)
-            return result
+            return session.write_transaction(self._create_node_transaction, label, properties)
 
     @staticmethod
     def _create_node_transaction(tx: Transaction, label: str, properties: Dict[str, Any]) -> Optional[int]:
@@ -852,8 +1345,9 @@ class Neo4jService:
 
     def create_relationship(self, source_id: int, target_id: int, relationship_type: str, properties: Dict[str, Any] = None) -> bool:
         with self.driver.session() as session:
-            success = session.write_transaction(self._create_relationship_transaction, source_id, target_id, relationship_type, properties)
-            return success
+            return session.write_transaction(
+                self._create_relationship_transaction, source_id, target_id, relationship_type, properties
+            )
 
     @staticmethod
     def _create_relationship_transaction(tx: Transaction, source_id: int, target_id: int, relationship_type: str, properties: Dict[str, Any] = None) -> bool:
@@ -875,40 +1369,62 @@ class Neo4jService:
             logger.error(f"Failed to create relationship: {e}")
             return False
 
-    def get_node(self, node_id: int) -> Optional[Dict[str, Any]]:
+    def get_all_entities(self) -> List[Dict[str, Any]]:
         with self.driver.session() as session:
-            node = session.read_transaction(self._get_node_transaction, node_id)
-            return node
+            return session.read_transaction(self._get_all_entities_transaction)
 
     @staticmethod
-    def _get_node_transaction(tx: Transaction, node_id: int) -> Optional[Dict[str, Any]]:
+    def _get_all_entities_transaction(tx: Transaction) -> List[Dict[str, Any]]:
         query = """
-        MATCH (n)
-        WHERE id(n) = $node_id
-        RETURN properties(n) AS properties
+        MATCH (e)
+        RETURN id(e) AS id, labels(e) AS labels, properties(e) AS properties
         """
         try:
-            result = tx.run(query, node_id=node_id)
-            record = result.single()
-            if record:
-                logger.info(f"Node retrieved with ID: {node_id}")
-                return record["properties"]
-            else:
-                logger.error(f"Node with ID {node_id} not found")
-                return None
+            result = tx.run(query)
+            entities = [{"id": record["id"], "labels": record["labels"], "properties": record["properties"]} for record in result]
+            return entities
         except Exception as e:
-            logger.error(f"Failed to retrieve node: {e}")
-            return None
+            logger.error(f"Failed to retrieve entities: {e}")
+            return []
 
-    def execute_query(self, query: str, parameters: Dict[str, Any] = None) -> Any:
+    def get_all_relationships(self) -> List[Dict[str, Any]]:
         with self.driver.session() as session:
-            result = session.run(query, **(parameters or {}))
-            return result.data()
+            return session.read_transaction(self._get_all_relationships_transaction)
+
+    @staticmethod
+    def _get_all_relationships_transaction(tx: Transaction) -> List[Dict[str, Any]]:
+        query = """
+        MATCH ()-[r]->()
+        RETURN id(r) AS id, type(r) AS type, startNode(r) AS source, endNode(r) AS target, properties(r) AS properties
+        """
+        try:
+            result = tx.run(query)
+            relationships = [
+                {
+                    "id": record["id"],
+                    "type": record["type"],
+                    "source": record["source"],
+                    "target": record["target"],
+                    "properties": record["properties"],
+                }
+                for record in result
+            ]
+            return relationships
+        except Exception as e:
+            logger.error(f"Failed to retrieve relationships: {e}")
+            return []
+
+    def generate_graph_visualization(self) -> dict:
+        with self.driver.session() as session:
+            nodes = session.read_transaction(self._get_all_entities_transaction)
+            relationships = session.read_transaction(self._get_all_relationships_transaction)
+            return {"nodes": nodes, "relationships": relationships}
 
 #-----
 
 # services/s3_service.py
 #-----
+# services/s3_service.py
 import boto3
 from botocore.exceptions import NoCredentialsError, ClientError
 from loguru import logger
@@ -916,7 +1432,7 @@ from typing import Optional
 from pathlib import Path
 
 class S3Service:
-    def __init__(self, endpoint_url: str, access_key: str, secret_key: str, region_name: Optional[str] = None):
+    def __init__(self, s3_client, endpoint_url: str, access_key: str, secret_key: str, region_name: Optional[str] = None, input_bucket: str = "input", output_bucket: str = "output", layouts_bucket: str = "layouts"):
         self.s3_client = boto3.client(
             's3',
             endpoint_url=endpoint_url,
@@ -924,6 +1440,10 @@ class S3Service:
             aws_secret_access_key=secret_key,
             region_name=region_name
         )
+        self.input_bucket = input_bucket
+        self.output_bucket = output_bucket
+        self.layouts_bucket = layouts_bucket
+
         logger.info(f"Connected to S3 at {endpoint_url}")
 
     def upload_file(self, file_path: Path, bucket_name: str, object_name: Optional[str] = None) -> Optional[str]:
@@ -991,6 +1511,62 @@ class S3Service:
             else:
                 logger.error(f"Error checking existence of file {object_name} in bucket {bucket_name}: {e}")
         return False
+
+#-----
+
+# services/rag_service.py
+#-----
+# service/rag_service.py
+import os
+from typing import Iterable
+from langchain_core.documents import Document as LCDocument
+from langchain_core.output_parsers import StrOutputParser
+from langchain_core.prompts import PromptTemplate
+from langchain_core.runnables import RunnablePassthrough
+from langchain_huggingface import HuggingFaceEndpoint
+
+class RAGChainService:
+    def __init__(self, retriever):
+        self.retriever = retriever
+        self.llm = self._initialize_llm()
+
+        # Define the prompt
+        self.prompt = PromptTemplate.from_template(
+            "Context information is below.\n---------------------\n{context}\n---------------------\n"
+            "Given the context information and not prior knowledge, answer the query.\nQuery: {question}\nAnswer:\n"
+        )
+
+    def _initialize_llm(self):
+        HF_API_KEY = os.environ.get("HF_API_KEY")
+        HF_LLM_MODEL_ID = "mistralai/Mistral-7B-Instruct-v0.3"
+        return HuggingFaceEndpoint(
+            repo_id=HF_LLM_MODEL_ID,
+            huggingfacehub_api_token=HF_API_KEY,
+        )
+
+    def format_docs(self, docs: Iterable[LCDocument]):
+        """
+        Format the documents for RAG.
+        """
+        return "\n\n".join(doc.page_content for doc in docs)
+
+    def build_chain(self):
+        """
+        Build the RAG chain.
+        """
+        return (
+            {"context": self.retriever | self.format_docs, "question": RunnablePassthrough()}
+            | self.prompt
+            | self.llm
+            | StrOutputParser()
+        )
+
+    def run_query(self, query: str):
+        """
+        Run the query through the RAG chain.
+        """
+        rag_chain = self.build_chain()
+        return rag_chain.invoke(query)
 
 #-----
 
@@ -1082,6 +1658,129 @@ class MLFlowService:
     def set_tracking_uri(self, uri: str):
         mlflow.set_tracking_uri(uri)
         logger.info(f"MLflow tracking URI updated to: {uri}")
+
+#-----
+
+# services/pgvector_service.py
+#-----
+import psycopg2
+from psycopg2.extras import Json
+from typing import Dict, Any, List, Optional
+from loguru import logger
+
+
+class PGVectorService:
+    def __init__(self, db_url: str, table_name: str = "document_vectors"):
+        """
+        Initialize PGVectorService with a PostgreSQL connection and table name.
+
+        Args:
+            db_url (str): Database connection string.
+            table_name (str): Name of the table to store and query vectors.
+        """
+        self.db_url = db_url
+        self.table_name = table_name
+        self.connection = self._connect_to_db()
+        self.cursor = self.connection.cursor()
+        self._ensure_table_exists()
+
+    def _connect_to_db(self):
+        """Establishes a connection to the PostgreSQL database."""
+        try:
+            connection = psycopg2.connect(self.db_url)
+            logger.info("Successfully connected to PostgreSQL database.")
+            return connection
+        except Exception as e:
+            logger.error(f"Failed to connect to PostgreSQL: {e}")
+            raise
+
+    def _ensure_table_exists(self):
+        """Ensure the required table exists in the database."""
+        try:
+            self.cursor.execute(f"""
+                CREATE TABLE IF NOT EXISTS {self.table_name} (
+                    id SERIAL PRIMARY KEY,
+                    embedding VECTOR,
+                    metadata JSONB,
+                    content TEXT
+                );
+            """)
+            self.connection.commit()
+            logger.info(f"Table '{self.table_name}' ensured in database.")
+        except Exception as e:
+            logger.error(f"Failed to ensure table exists: {e}")
+            raise
+
+    def store_vector(self, embedding: List[float], metadata: Dict[str, Any], content: str) -> Optional[int]:
+        """
+        Store a vector in the database.
+
+        Args:
+            embedding (List[float]): Vector embedding.
+            metadata (Dict[str, Any]): Metadata for the document.
+            content (str): Document content.
+
+        Returns:
+            Optional[int]: Row ID of the stored vector.
+        """
+        try:
+            self.cursor.execute(
+                f"""
+                INSERT INTO {self.table_name} (embedding, metadata, content)
+                VALUES (%s, %s, %s) RETURNING id;
+                """,
+                (embedding, Json(metadata), content)
+            )
+            row_id = self.cursor.fetchone()[0]
+            self.connection.commit()
+            logger.info(f"Vector stored with ID {row_id}.")
+            return row_id
+        except Exception as e:
+            logger.error(f"Error storing vector: {e}")
+            self.connection.rollback()
+            return None
+
+    def search_vector(self, query_vector: List[float], k: int = 5) -> List[Dict[str, Any]]:
+        """
+        Search for the nearest vectors.
+
+        Args:
+            query_vector (List[float]): Query vector.
+            k (int): Number of nearest neighbors to return.
+
+        Returns:
+            List[Dict[str, Any]]: List of results with metadata and distances.
+        """
+        try:
+            self.cursor.execute(
+                f"""
+                SELECT id, content, metadata, embedding <=> %s AS distance
+                FROM {self.table_name}
+                ORDER BY distance ASC
+                LIMIT %s;
+                """,
+                (query_vector, k)
+            )
+            results = self.cursor.fetchall()
+            logger.info(f"Found {len(results)} nearest vectors.")
+            return [
+                {"id": row[0], "content": row[1], "metadata": row[2], "distance": row[3]}
+                for row in results
+            ]
+        except Exception as e:
+            logger.error(f"Error searching vector: {e}")
+            return []
+
+    def close(self):
+        """Close the database connection."""
+        try:
+            if self.cursor:
+                self.cursor.close()
+            if self.connection:
+                self.connection.close()
+            logger.info("Database connection closed.")
+        except Exception as e:
+            logger.error(f"Error closing database connection: {e}")
 
 #-----
 
@@ -1212,6 +1911,7 @@ import json
 import yaml
 from pathlib import Path
 from typing import List, Dict
+from langchain_core.documents import Document
 from docling.document_converter import DocumentConverter, PdfFormatOption
 from docling.datamodel.base_models import InputFormat
 from docling.datamodel.document import ConversionResult, ConversionStatus
@@ -1219,56 +1919,91 @@ from docling.datamodel.pipeline_options import PdfPipelineOptions
 from docling.backend.pypdfium2_backend import PyPdfiumDocumentBackend
 from services.s3_service import S3Service
 from services.mlflow_service import MLFlowService
+from services.pgvector_service import PGVectorService
+from services.neo4j_service import Neo4jService
 from sqlalchemy.orm import Session
 from models.sqlalchemy.document_log import DocumentLog
+from loguru import logger
+from langchain_text_splitters import CharacterTextSplitter
+from langchain_experimental.graph_transformers.gliner import GlinerGraphTransformer
+
 
 class CustomPdfPipelineOptions(PdfPipelineOptions):
+    """Custom pipeline options for PDF processing."""
     do_picture_classifier: bool = False
 
+
 class DocumentProcessor:
-    def __init__(self, s3_service: S3Service, mlflow_service: MLFlowService, session: Session):
+    """Orchestrates the entire document processing pipeline: splitting, exporting, and indexing."""
+
+    def __init__(
+        self,
+        s3_service: S3Service,
+        mlflow_service: MLFlowService,
+        pgvector_service: PGVectorService,
+        neo4j_service: Neo4jService,
+        session: Session,
+        text_splitter: CharacterTextSplitter,
+        graph_transformer: GlinerGraphTransformer,
+    ):
         self.s3_service = s3_service
         self.mlflow_service = mlflow_service
+        self.pgvector_service = pgvector_service
+        self.neo4j_service = neo4j_service
         self.session = session
+        self.text_splitter = text_splitter
+        self.graph_transformer = graph_transformer
 
-    def create_converter(self, use_ocr: bool, export_figures: bool, export_tables: bool, enrich_figures: bool):
+    def create_converter(self, use_ocr: bool, export_figures: bool, export_tables: bool, enrich_figures: bool) -> DocumentConverter:
+        """Create and configure a document converter."""
         options = CustomPdfPipelineOptions()
         options.do_ocr = use_ocr
         options.generate_page_images = True
         options.generate_table_images = export_tables
         options.generate_picture_images = export_figures
         options.do_picture_classifier = enrich_figures
+
         return DocumentConverter(
             allowed_formats=[InputFormat.PDF, InputFormat.DOCX],
             format_options={InputFormat.PDF: PdfFormatOption(pipeline_options=options, backend=PyPdfiumDocumentBackend)}
         )
 
     def log_document(self, file_name: str, s3_url: str):
-        log = DocumentLog(file_name=file_name, s3_url=s3_url)
-        self.session.add(log)
-        self.session.commit()
+        """Log document metadata into the database."""
+        try:
+            log = DocumentLog(file_name=file_name, s3_url=s3_url)
+            self.session.add(log)
+            self.session.commit()
+            logger.info(f"Document logged: {file_name}")
+        except Exception as e:
+            logger.error(f"Failed to log document {file_name}: {e}")
+            self.session.rollback()
+            raise
 
-    def export_document(self, result: ConversionResult, output_dir: Path, export_formats: List[str], export_figures: bool, export_tables: bool):
-        success_count, partial_success_count, failure_count = 0, 0, 0
-        doc_filename = result.input.file.stem
+    def export_document(
+        self,
+        result: ConversionResult,
+        output_dir: Path,
+        export_formats: List[str],
+        export_figures: bool,
+        export_tables: bool
+    ):
+        """Export document into the specified formats and upload to S3."""
+        try:
+            doc_filename = result.input.file.stem
+            if result.status == ConversionStatus.SUCCESS:
+                self._export_file(result, output_dir, export_formats, export_figures, export_tables, doc_filename)
+                logger.info(f"Document exported successfully: {doc_filename}")
+            else:
+                logger.warning(f"Document export failed for {doc_filename}: {result.status}")
+        except Exception as e:
+            logger.error(f"Error exporting document: {e}")
+            raise
 
-        if result.status == ConversionStatus.SUCCESS:
-            success_count += 1
-            self._export_file(result, output_dir, export_formats, export_figures, export_tables, doc_filename)
-        elif result.status == ConversionStatus.PARTIAL_SUCCESS:
-            partial_success_count += 1
-        else:
-            failure_count += 1
-
-        return success_count, partial_success_count, failure_count
-
-    def _export_file(self, result, output_dir, export_formats: List[str], export_figures: bool, export_tables: bool, doc_filename: str):
-        if "json" in export_formats:
-            self._save_and_upload(result, output_dir, doc_filename, "json", export_format="json")
-        if "yaml" in export_formats:
-            self._save_and_upload(result, output_dir, doc_filename, "yaml", export_format="yaml")
-        if "md" in export_formats:
-            self._save_and_upload(result, output_dir, doc_filename, "md", export_format="md")
+    def _export_file(self, result, output_dir, export_formats, export_figures, export_tables, doc_filename):
+        """Save and upload the exported document files."""
+        for ext in export_formats:
+            self._save_and_upload(result, output_dir, doc_filename, ext, export_format=ext)
 
         if export_figures:
             self._export_images(result, output_dir / "figures", doc_filename, self.s3_service.layouts_bucket)
@@ -1276,6 +2011,7 @@ class DocumentProcessor:
             self._export_tables(result, output_dir / "tables", doc_filename, self.s3_service.layouts_bucket)
 
     def _save_and_upload(self, result, output_dir, doc_filename, ext, export_format="json"):
+        """Save a specific document format locally and upload it to S3."""
         file_path = output_dir / f"{doc_filename}.{ext}"
         with file_path.open("w", encoding="utf-8") as file:
             if export_format == "json":
@@ -1287,6 +2023,7 @@ class DocumentProcessor:
         self.s3_service.upload_file(file_path, self.s3_service.output_bucket)
 
     def _export_images(self, result, figures_dir, doc_filename, bucket):
+        """Export and upload document images."""
         figures_dir.mkdir(exist_ok=True)
         for idx, element in enumerate(result.document.iterate_items()):
             if isinstance(element, PictureItem):
@@ -1295,21 +2032,41 @@ class DocumentProcessor:
                 self.s3_service.upload_file(image_path, bucket)
 
     def _export_tables(self, result, tables_dir, doc_filename, bucket):
+        """Export and upload document tables."""
         tables_dir.mkdir(exist_ok=True)
         for idx, table in enumerate(result.document.tables):
             csv_path = tables_dir / f"{doc_filename}_table_{idx + 1}.csv"
             table.export_to_dataframe().to_csv(csv_path, index=False, encoding="utf-8")
             self.s3_service.upload_file(csv_path, bucket)
 
-            html_path = tables_dir / f"{doc_filename}_table_{idx + 1}.html"
-            with html_path.open("w", encoding="utf-8") as html_file:
-                html_file.write(table.export_to_html())
-            self.s3_service.upload_file(html_path, bucket)
+    def process_and_index_document(self, document: Document):
+        """Process a document: split, index into PGVector, and index into Neo4j."""
+        try:
+            logger.info(f"Processing document: {document.metadata.get('name', 'Unknown')}")
+
+            # Step 1: Split the document into chunks
+            split_docs = self.text_splitter.split_documents([document])
+            logger.info(f"Document split into {len(split_docs)} chunks.")
+
+            # Step 2: Index chunks into PGVector
+            self.pgvector_service.index_documents(split_docs)
+
+            # Step 3: Transform and index graph data into Neo4j
+            graph_docs = self.graph_transformer.convert_to_graph_documents(split_docs)
+            for graph_doc in graph_docs:
+                self.neo4j_service.index_graph(graph_doc.nodes, graph_doc.edges)
+
+            logger.info(f"Document indexed successfully: {document.metadata.get('name', 'Unknown')}")
+
+        except Exception as e:
+            logger.error(f"Error processing document: {e}")
+            raise
 
 #-----
 
 # services/embedding_service.py
 #-----
+# services/embedding_service.py
 from langchain_ollama.embeddings import OllamaEmbeddings
 from loguru import logger
 from typing import List
@@ -1337,4 +2094,9 @@ class EmbeddingService:
             logger.error(f"Failed to generate embedding: {e}")
             return []
 
+    def embed_documents(self, texts):
+        return self.embedding_model.embed_documents(texts)
+
+    def embed_query(self, text):
+        return self.embedding_model.embed_query(text)
 #-----

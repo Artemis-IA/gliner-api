@@ -1,66 +1,123 @@
-# services/document_processor.py
 import os
+import re
 import json
 import yaml
 from pathlib import Path
-from typing import List, Dict
+from typing import List, Iterator
+
 from docling.document_converter import DocumentConverter, PdfFormatOption
 from docling.datamodel.base_models import InputFormat
 from docling.datamodel.document import ConversionResult, ConversionStatus
 from docling.datamodel.pipeline_options import PdfPipelineOptions
 from docling.backend.pypdfium2_backend import PyPdfiumDocumentBackend
+from docling_core.types.doc import PictureItem
+
 from services.s3_service import S3Service
 from services.mlflow_service import MLFlowService
+from services.pgvector_service import PGVectorService
+from services.neo4j_service import Neo4jService
+
 from sqlalchemy.orm import Session
 from models.sqlalchemy.document_log import DocumentLog
 
+from loguru import logger
+from langchain.text_splitter import CharacterTextSplitter
+from langchain_experimental.graph_transformers.gliner import GlinerGraphTransformer
+from langchain_core.document_loaders import BaseLoader
+from langchain_core.documents import Document as LCDocument
+from py2neo import Graph, NodeMatcher, Relationship
+
+from services.embedding_service import EmbeddingService
+
 class CustomPdfPipelineOptions(PdfPipelineOptions):
+    """Custom pipeline options for PDF processing."""
     do_picture_classifier: bool = False
 
+class DoclingPDFLoader(BaseLoader):
+
+    def __init__(self, file_path: str | list[str]) -> None:
+        self._file_paths = file_path if isinstance(file_path, list) else [file_path]
+        self._converter = DocumentConverter()
+
+    def lazy_load(self) -> Iterator[LCDocument]:
+        for source in self._file_paths:
+            dl_doc = self._converter.convert(source).document
+            text = dl_doc.export_to_markdown()
+            yield LCDocument(page_content=text)
+
 class DocumentProcessor:
-    def __init__(self, s3_service: S3Service, mlflow_service: MLFlowService, session: Session):
+    """Orchestrates the entire document processing pipeline: splitting, exporting, and indexing."""
+
+    def __init__(
+        self,
+        s3_service: S3Service,
+        mlflow_service: MLFlowService,
+        pgvector_service: PGVectorService,
+        neo4j_service: Neo4jService,
+        embedding_service: EmbeddingService,
+        session: Session,
+        text_splitter: CharacterTextSplitter,
+        graph_transformer: GlinerGraphTransformer,
+    ):
         self.s3_service = s3_service
         self.mlflow_service = mlflow_service
+        self.pgvector_service = pgvector_service
+        self.neo4j_service = neo4j_service
+        self.embedding_service = embedding_service
         self.session = session or (session_factory and session_factory())
+        self.text_splitter = text_splitter
+        self.graph_transformer = graph_transformer
 
-    def create_converter(self, use_ocr: bool, export_figures: bool, export_tables: bool, enrich_figures: bool):
+    def create_converter(self, use_ocr: bool, export_figures: bool, export_tables: bool, enrich_figures: bool) -> DocumentConverter:
+        """Create and configure a document converter."""
         options = CustomPdfPipelineOptions()
         options.do_ocr = use_ocr
         options.generate_page_images = True
         options.generate_table_images = export_tables
         options.generate_picture_images = export_figures
         options.do_picture_classifier = enrich_figures
+
         return DocumentConverter(
             allowed_formats=[InputFormat.PDF, InputFormat.DOCX],
             format_options={InputFormat.PDF: PdfFormatOption(pipeline_options=options, backend=PyPdfiumDocumentBackend)}
         )
 
     def log_document(self, file_name: str, s3_url: str):
-        log = DocumentLog(file_name=file_name, s3_url=s3_url)
-        self.session.add(log)
-        self.session.commit()
+        """Log document metadata into the database."""
+        try:
+            log = DocumentLog(file_name=file_name, s3_url=s3_url)
+            self.session.add(log)
+            self.session.commit()
+            logger.info(f"Document logged: {file_name}")
+        except Exception as e:
+            logger.error(f"Failed to log document {file_name}: {e}")
+            self.session.rollback()
+            raise
 
-    def export_document(self, result: ConversionResult, output_dir: Path, export_formats: List[str], export_figures: bool, export_tables: bool):
-        success_count, partial_success_count, failure_count = 0, 0, 0
-        doc_filename = result.input.file.stem
+    def export_document(
+        self,
+        result: ConversionResult,
+        output_dir: Path,
+        export_formats: List[str],
+        export_figures: bool,
+        export_tables: bool
+    ):
+        """Export document into the specified formats and upload to S3."""
+        try:
+            doc_filename = result.input.file.stem
+            if result.status == ConversionStatus.SUCCESS:
+                self._export_file(result, output_dir, export_formats, export_figures, export_tables, doc_filename)
+                logger.info(f"Document exported successfully: {doc_filename}")
+            else:
+                logger.warning(f"Document export failed for {doc_filename}: {result.status}")
+        except Exception as e:
+            logger.error(f"Error exporting document: {e}")
+            raise
 
-        if result.status == ConversionStatus.SUCCESS:
-            success_count += 1
-            self._export_file(result, output_dir, export_formats, export_figures, export_tables, doc_filename)
-        elif result.status == ConversionStatus.PARTIAL_SUCCESS:
-            partial_success_count += 1
-        else:
-            failure_count += 1
-
-        return success_count, partial_success_count, failure_count
-
-    def _export_file(self, result, output_dir, export_formats: List[str], export_figures: bool, export_tables: bool, doc_filename: str):
-        if "json" in export_formats:
-            self._save_and_upload(result, output_dir, doc_filename, "json", export_format="json")
-        if "yaml" in export_formats:
-            self._save_and_upload(result, output_dir, doc_filename, "yaml", export_format="yaml")
-        if "md" in export_formats:
-            self._save_and_upload(result, output_dir, doc_filename, "md", export_format="md")
+    def _export_file(self, result, output_dir, export_formats, export_figures, export_tables, doc_filename):
+        """Save and upload the exported document files."""
+        for ext in export_formats:
+            self._save_and_upload(result, output_dir, doc_filename, ext, export_format=ext)
 
         if export_figures:
             self._export_images(result, output_dir / "figures", doc_filename, self.s3_service.layouts_bucket)
@@ -68,6 +125,7 @@ class DocumentProcessor:
             self._export_tables(result, output_dir / "tables", doc_filename, self.s3_service.layouts_bucket)
 
     def _save_and_upload(self, result, output_dir, doc_filename, ext, export_format="json"):
+        """Save a specific document format locally and upload it to S3."""
         file_path = output_dir / f"{doc_filename}.{ext}"
         with file_path.open("w", encoding="utf-8") as file:
             if export_format == "json":
@@ -79,6 +137,7 @@ class DocumentProcessor:
         self.s3_service.upload_file(file_path, self.s3_service.output_bucket)
 
     def _export_images(self, result, figures_dir, doc_filename, bucket):
+        """Export and upload document images."""
         figures_dir.mkdir(exist_ok=True)
         for idx, element in enumerate(result.document.iterate_items()):
             if isinstance(element, PictureItem):
@@ -87,13 +146,155 @@ class DocumentProcessor:
                 self.s3_service.upload_file(image_path, bucket)
 
     def _export_tables(self, result, tables_dir, doc_filename, bucket):
+        """Export and upload document tables."""
         tables_dir.mkdir(exist_ok=True)
         for idx, table in enumerate(result.document.tables):
             csv_path = tables_dir / f"{doc_filename}_table_{idx + 1}.csv"
             table.export_to_dataframe().to_csv(csv_path, index=False, encoding="utf-8")
             self.s3_service.upload_file(csv_path, bucket)
 
-            html_path = tables_dir / f"{doc_filename}_table_{idx + 1}.html"
-            with html_path.open("w", encoding="utf-8") as html_file:
-                html_file.write(table.export_to_html())
-            self.s3_service.upload_file(html_path, bucket)
+
+    def process_and_index_document(self, file_path: str):
+        """
+        Process a document: extract embeddings, store them in PGVector, and transform them
+        into a graph structure for indexing in Neo4j.
+        """
+        try:
+            # Step 1: Load the document
+            logger.info(f"Loading document from {file_path}")
+            loader = DoclingPDFLoader(file_path=file_path)
+            docs = list(loader.lazy_load())
+            if not docs:
+                raise ValueError("No valid documents found.")
+
+            logger.info(f"Loaded {len(docs)} document(s) from {file_path}")
+
+            # Step 2: Split the document into chunks
+            logger.info(f"Splitting document into chunks...")
+            split_docs = self.text_splitter.split_documents(docs)
+            split_docs = [
+                LCDocument(
+                    page_content=self.clean_text(chunk.page_content),
+                    metadata=chunk.metadata,
+                )
+                for chunk in split_docs
+            ]
+            logger.info(f"Document split into {len(split_docs)} chunks.")
+
+            # Step 3: Validate document content
+            if not all(self.validate_document_content(chunk) for chunk in split_docs):
+                logger.error("Invalid document chunks detected; skipping.")
+                return
+
+            # Step 4: Generate embeddings and store in PGVector
+            for doc in split_docs:
+                embedding = self.embedding_service.generate_embedding(doc.page_content)
+                if embedding:
+                    self.pgvector_service.store_vector(
+                        embedding=embedding,
+                        metadata=doc.metadata,
+                        content=doc.page_content,
+                    )
+            logger.info(f"Indexed {len(split_docs)} chunks into PGVector.")
+
+            # Step 5: Transform chunks into a graph structure
+            logger.info(f"Transforming document chunks into graph structure...")
+            graph_docs = self.graph_transformer.convert_to_graph_documents(split_docs)
+
+            # Step 6: Validate graph documents
+            if not all(self.validate_graph_elements(graph_doc) for graph_doc in graph_docs):
+                logger.error("Invalid GraphDocument structure detected. Skipping document.")
+                return
+
+            # Step 7: Index nodes and edges into Neo4j
+            with self.neo4j_service.driver.session() as session:
+                with session.begin_transaction() as tx:
+                    for graph_doc in graph_docs:
+                        nodes = graph_doc.get("nodes", [])
+                        edges = graph_doc.get("edges", [])
+
+                        if not nodes:
+                            logger.warning("Graph document has no nodes; skipping.")
+                            continue
+
+                        # Add nodes
+                        for node in nodes:
+                            tx.run(
+                                """
+                                MERGE (e:Entity {id: $id, name: $name, type: $type})
+                                ON CREATE SET e.created_at = timestamp()
+                                """,
+                                {
+                                    "id": node.id,
+                                    "name": node.properties.get("name", ""),
+                                    "type": node.type,
+                                },
+                            )
+                            logger.info(f"Indexed Node: {node.id}, Type: {node.type}")
+
+                        # Add relationships
+                        if edges:
+                            self.add_relationships(tx, edges)
+                        else:
+                            logger.warning("No relationships to add for this document.")
+
+            logger.info("Graph data indexed successfully in Neo4j.")
+
+        except Exception as e:
+            logger.error(f"Error processing document {file_path}: {e}")
+            raise
+
+    def validate_document_content(self, document: LCDocument) -> bool:
+        """
+        Validate the content of a document chunk.
+        """
+        if not document.page_content.strip():
+            logger.warning("Document content is empty.")
+            return False
+        return True
+
+    def validate_graph_elements(self, graph_doc: dict) -> bool:
+        """
+        Validate the structure of a graph document.
+        """
+        if not graph_doc.get("nodes"):
+            logger.warning("Graph document has no nodes.")
+            return False
+        for node in graph_doc.get("nodes", []):
+            if not node.get("id") or not node.get("type"):
+                logger.warning(f"Invalid node detected: {node}")
+                return False
+        return True
+
+
+
+    def clean_text(text: str) -> str:
+        """Clean up text to remove unwanted characters and normalize whitespace."""
+        text = text.replace("\n", " ").strip()
+        return re.sub(r'\s+', ' ', text)
+
+
+    def add_relationships(tx, relationships: List[Relationship]):
+        """Add relationships to the Neo4j database."""
+        for rel in relationships:
+            try:
+                if not rel.source or not rel.target or not rel.type:
+                    logger.warning(f"Skipping invalid relationship: {rel}")
+                    continue
+
+                logger.info(f"Adding Relationship: {rel.type} ({rel.source.id} -> {rel.target.id})")
+                tx.run(
+                    """
+                    MATCH (source:Entity {id: $source_id}), (target:Entity {id: $target_id})
+                    MERGE (source)-[r:$type {properties: $properties}]->(target)
+                    ON CREATE SET r.created_at = timestamp()
+                    """,
+                    {
+                        "source_id": rel.source.id,
+                        "target_id": rel.target.id,
+                        "type": rel.type,
+                        "properties": rel.properties or {},
+                    },
+                )
+            except Exception as e:
+                logger.error(f"Failed to add relationship: {rel}. Error: {e}")

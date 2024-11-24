@@ -54,7 +54,7 @@ class Settings(BaseSettings):
     MINIO_ROOT_USER: str = "minio"
     MINIO_ROOT_PASSWORD: str = "minio123"
     MINIO_API_URL: str = "http://minio:9000"
-    MINIO_URL: str = "http://minio:9000"  # Ajout explicite de MINIO_URL pour éviter les erreurs
+    MINIO_URL: str = "http://minio:9000"
 
     # AWS settings for MinIO compatibility
     AWS_ACCESS_KEY_ID: str = "minio"
@@ -94,6 +94,7 @@ class Settings(BaseSettings):
     GLINER_MODEL_NAME: str = "knowledgator/gliner-multitask-large-v0.5"
     LABEL_STUDIO_ML_BACKENDS: str = '[{"url": "http://gliner:9097", "name": "GLiNER"}]'
 
+    GLIREL_MODEL_NAME: str = "jackboyla/glirel-large-v0"
     # Secret Key
     SECRET_KEY: str = "super_secret_key_123"
 
@@ -127,8 +128,15 @@ class Settings(BaseSettings):
         "max_len": 384,
     }
 
+    # Text splitting settings
+    TEXT_CHUNK_SIZE: int = 1000
+    TEXT_CHUNK_OVERLAP: int = 200
+    CONF_FILE: str = "../conf/gli_config.yml"
+    
+
+    # Ollama
+    OLLAMA_MODEL: str ="nomic-embed-text"
     class Config:
-        # Specify the path to your `.env` file
         env_file = Path(__file__).resolve().parents[2] / ".env"
         env_file_encoding = "utf-8"
         extra = "allow"
