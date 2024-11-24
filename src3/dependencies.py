@@ -95,18 +95,17 @@ def get_text_splitter() -> RecursiveCharacterTextSplitter:
     )
 
 # Dependency to get the GLiNER extractor
+
 def get_gliner_extractor() -> GLiNERLinkExtractor:
-    """Returns an instance of the GLiNER extractor."""
     with open(settings.CONF_FILE, 'r') as file:
         config = yaml.safe_load(file)
     return GLiNERLinkExtractor(
         labels=config["labels"],
-        model=settings.GLINER_MODEL
+        model=settings.GLINER_MODEL_NAME,
     )
 
-# Dependency to get the graph transformer
+
 def get_graph_transformer() -> GlinerGraphTransformer:
-    """Returns an instance of the GlinerGraphTransformer."""
     with open(settings.CONF_FILE, 'r') as file:
         config = yaml.safe_load(file)
     return GlinerGraphTransformer(
@@ -118,17 +117,17 @@ def get_graph_transformer() -> GlinerGraphTransformer:
         relationship_confidence_threshold=0.1,
     )
 
-# Dependency to get the document processor
+
 def get_document_processor(db: Session = Depends(get_db)) -> DocumentProcessor:
-    """Returns an instance of the Document Processor."""
     s3_service = get_s3_service()
     mlflow_service = get_mlflow_service()
     pgvector_service = get_pgvector_service()
     text_splitter = get_text_splitter()
-    graph_transformer = get_graph_transformer()
     neo4j_service = get_neo4j_service()
     embedding_service = get_embedding_service()
-
+    gliner_extractor = get_gliner_extractor()
+    graph_transformer = get_graph_transformer()
+    
     return DocumentProcessor(
         s3_service=s3_service,
         mlflow_service=mlflow_service,
@@ -137,7 +136,8 @@ def get_document_processor(db: Session = Depends(get_db)) -> DocumentProcessor:
         embedding_service=embedding_service,
         session=db,
         text_splitter=text_splitter,
-        graph_transformer=graph_transformer
+        graph_transformer=graph_transformer,
+        gliner_extractor=gliner_extractor,
     )
 
 # Dependency to get the RAG service

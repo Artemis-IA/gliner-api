@@ -7,6 +7,7 @@ from prometheus_client import CONTENT_TYPE_LATEST, generate_latest
 from routers import documents, entities, relationships, search, graph
 from utils.metrics import start_metrics_server, REQUEST_COUNT, PROCESS_TIME, log_system_metrics, _remove_codecarbon_lock, get_system_metrics
 from config import settings
+from dependencies import get_graph_transformer, get_gliner_extractor
 
 
 def create_app() -> FastAPI:
@@ -67,10 +68,10 @@ async def startup_event():
     # _remove_codecarbon_lock()
     logger.info("Application starting...")
     start_metrics_server(port=8002)
-
-    # Log system metrics on startup
     system_metrics = get_system_metrics()
-    device_type = "GPU" if system_metrics["cuda"] else "CPU"
+    device_type = "cuda" if system_metrics["cuda"] else "CPU"
+    logger.info(f"Device Type: {device_type}")
+
 
 
 @app.on_event("shutdown")
